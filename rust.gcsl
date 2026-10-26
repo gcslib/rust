@@ -51,6 +51,15 @@
 #   a build script's bindgen loads, for which it is given too the target C
 #   toolchain's own headers and sysroot to parse with. A hermetic step: Cargo runs in a sandbox of the toolchain's
 #   runtime, with the toolchain, the source and the crates, and nothing else.
+# - `cargo_sources(vendor)`: the sections of Cargo's configuration that
+#   make it take every crate from `vendor`, as `cargo vendor` prints them.
+# - `default_rustflags(target)`, `default_target_c(target)`: the flags and
+#   the C toolchain a build for `target` takes unless given, as
+#   `cargo_build` describes them; `builtin_headers(c)`, the directory of the
+#   C compiler's own headers in the C toolchain `c`, from its root.
+#
+# `crates.gcsl` builds a workspace one crate at a time instead: see its
+# `workspace`.
 import fs
 import unpack from archive
 import toolchain
@@ -303,7 +312,7 @@ fn vendor(
 # The flags a build for `target` takes unless given: static,
 # position-independent programs for a musl target, which need nothing of the
 # system they run on, and none for any other.
-fn default_rustflags(target: String) -> List<String> {
+def default_rustflags(target: String) -> List<String> {
     = if target.ends_with("-musl") {
         ["-Crelocation-model=pic", "-Clink-self-contained=yes", "-Clink-arg=-static-pie"]
     } else {
@@ -314,20 +323,42 @@ fn default_rustflags(target: String) -> List<String> {
 # The C toolchain that compiles a crate's C for `target` unless one is
 # given: the gcc library's musl toolchain for a musl target, else the
 # registered C toolchain.
-fn default_target_c(target: String) -> toolchain.CToolchain {
+def default_target_c(target: String) -> toolchain.CToolchain {
     = if target.ends_with("-musl") { gcc_x86_64_musl() } else { toolchain.get(Toolchain::C) }
 }
 
 # The directory of the C compiler's own headers, `stddef.h`'s, in the C
 # toolchain `c`, from its install's root: what `cc -print-file-name=include`
 # says.
-fn builtin_headers(c: toolchain.CToolchain) -> String {
+def builtin_headers(c: toolchain.CToolchain) -> String {
     for each in c.root.dir("lib/gcc").files() {
         if each.path.ends_with("/include/stddef.h") {
             return each.path.strip_prefix(c.root.path).strip_prefix("/").strip_suffix("/stddef.h")
         }
     }
     panic("the C toolchain at `{c.root.path}` has no `lib/gcc/*/include/stddef.h`")
+}
+
+def cargo_sources(vendor: Vendored): String {
+    # Each git source, found among the vendored crates, as `cargo vendor`
+    # writes it: the repository and its query, a revision say.
+    let mut git_sources = ""
+    let mut seen: List<String> = []
+    for each in vendor.git {
+        if seen.contains(each.source) {
+            continue
+        }
+        seen := [...seen, each.source]
+        let parts = each.source.split("?")
+        let pairs: List<String> = if len(parts) == 2 { parts[1].split("&") } else { [] }
+        let mut query = ""
+        for pair in pairs {
+            let kv = pair.split("=")
+            query := "{query}{kv[0]} = \"{kv[1]}\"\n"
+        }
+        git_sources := "{git_sources}[source.\"{each.source}\"]\ngit = \"{each.url}\"\n{query}replace-with = \"vendored\"\n"
+    }
+    = "[source.crates-io]\nreplace-with = \"vendored\"\n{git_sources}[source.vendored]\ndirectory = \"/work/vendor\"\n"
 }
 
 #[hermetic]
@@ -348,24 +379,6 @@ def cargo_build(
     let home = dir(".").path
     let config = "{home}/config.toml"
     let cc = "{OPT_CC}/{rust.cc.path.strip_prefix(rust.cc_root.path).strip_prefix("/")}"
-    # Each git source, found among the vendored crates, as `cargo vendor`
-    # writes it: the repository and its query, a revision say.
-    let mut git_sources = ""
-    let mut seen: List<String> = []
-    for each in vendor.git {
-        if seen.contains(each.source) {
-            continue
-        }
-        seen := [...seen, each.source]
-        let parts = each.source.split("?")
-        let pairs: List<String> = if len(parts) == 2 { parts[1].split("&") } else { [] }
-        let mut query = ""
-        for pair in pairs {
-            let kv = pair.split("=")
-            query := "{query}{kv[0]} = \"{kv[1]}\"\n"
-        }
-        git_sources := "{git_sources}[source.\"{each.source}\"]\ngit = \"{each.url}\"\n{query}replace-with = \"vendored\"\n"
-    }
     # The C of a crate for the target, its build script's through `cc`,
     # compiled by the target's own C toolchain, musl's for a musl target, and
     # for the build's own machine by the one that links.
@@ -394,7 +407,7 @@ def cargo_build(
     let host = if target == HOST { "" } else { "[target.{HOST}]\nlinker = \"{cc}\"\n" }
     let written = fs.write(
         config,
-        "[source.crates-io]\nreplace-with = \"vendored\"\n{git_sources}[source.vendored]\ndirectory = \"/work/vendor\"\n\
+        "{cargo_sources(vendor)}\
          [target.{target}]\nlinker = \"{cc}\"\n{host}\
          [env]\nCC_{target_var} = \"{target_cc}\"\nAR_{target_var} = \"{target_ar}\"\n{given}\
          [build]\nrustflags = [{quoted_flags}]\n",
