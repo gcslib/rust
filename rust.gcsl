@@ -371,7 +371,7 @@ def cargo_build(
     rustflags: List<String> = default_rustflags(target),
     beside: List<{at: String, place: Dir}> = [],
     libs: List<String> = [],
-    env: List<{name: String, value: String}> = [],
+    env: List<Entry<String>> = [],
     libclang: List<Dir> = [],
     rust: RustToolchain = toolchain.get(Toolchain::Rust),
     target_c: toolchain.CToolchain = default_target_c(target),
@@ -394,7 +394,7 @@ def cargo_build(
     # sysroot for it to parse with, as the toolchain's compiler would.
     let mut given = ""
     for each in env {
-        given := "{given}{each.name} = \"{each.value}\"\n"
+        given := "{given}{each.key} = \"{each.value}\"\n"
     }
     for each in libclang {
         let builtin = builtin_headers(target_c)

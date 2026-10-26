@@ -35,8 +35,8 @@
 #
 # Each step's sandbox holds the toolchain, the crate's own directory, at its
 # path in the workspace or among the vendored crates, and what it is given,
-# nothing else. A program each step runs is started by a small launcher this
-# library compiles first, which gives it exactly the environment Cargo would.
+# nothing else. Each program a step runs is given exactly the environment
+# Cargo would give it, made with `record` from the variables' names.
 # A dependency's output and a build script's are placed at their paths in
 # `pekit-out`, which name them, so that what a crate is compiled with is the
 # same wherever it is built from.
@@ -75,7 +75,7 @@ let RESERVED = ["rerun-if-changed", "rerun-if-env-changed", "warning", "error", 
 type CrateSettings = {
     package: String,
     data: List<{at: String, place: Dir | File}> = [],
-    env: List<{name: String, value: String}> = [],
+    env: List<Entry<String>> = [],
     given: List<{at: String, place: Dir | File}> = [],
 }
 
@@ -141,7 +141,6 @@ type RustWorkspace = {
     target_c: toolchain.CToolchain,
     skeleton: Skeleton,
     metadata: Metadata,
-    launcher: File,
     target_cfg: File,
     host_cfg: File,
 }
@@ -170,7 +169,6 @@ def workspace(
         target_c = target_c
         skeleton = skeleton
         metadata = metadata
-        launcher = launcher(rust)
         target_cfg = rustc_cfg(rust, target)
         host_cfg = rustc_cfg(rust, HOST)
     }
@@ -298,70 +296,6 @@ fn rustc_cfg(rust: RustToolchain, target: String, flags: List<String> = []) -> F
     = file(at)
 }
 
-# --- The launcher ---
-
-# The launcher's source: it runs a program with exactly the environment a
-# file holds, `NAME=VALUE` entries each ended by a NUL, and the arguments
-# after the file's path and the program's.
-let LAUNCHER = r"""
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::process::CommandExt;
-
-    fn main() {
-        let mut args = std::env::args_os().skip(1);
-        let file = args.next().expect("an environment file");
-        let program = args.next().expect("a program");
-        let text = std::fs::read(&file).expect("the environment file");
-        let mut command = std::process::Command::new(&program);
-        command.env_clear();
-        for entry in text.split(|&byte| byte == 0) {
-            if entry.is_empty() {
-                continue;
-            }
-            let at = entry.iter().position(|&byte| byte == b'=').expect("NAME=VALUE");
-            command.env(OsStr::from_bytes(&entry[..at]), OsStr::from_bytes(&entry[at + 1..]));
-        }
-        command.args(args);
-        let error = command.exec();
-        eprintln!("cannot run {}: {error}", program.to_string_lossy());
-        std::process::exit(127);
-    }
-    """
-
-# The launcher, a static program, compiled from `LAUNCHER`.
-#[hermetic]
-fn launcher(rust: RustToolchain) -> File {
-    let source = "{dir(".").path}/launch.rs"
-    let wrote = fs.write(source, LAUNCHER)
-    let cc = "{OPT_CC}/{rust.cc.path.strip_prefix(rust.cc_root.path).strip_prefix("/")}"
-    let box = fs.compose([
-        {at = "/"; place = rust.runtime},
-        {at = OPT_RUST; place = rust.root},
-        {at = OPT_CC; place = rust.cc_root},
-        {at = "/work/launch.rs"; place = file(source)},
-    ]).sandbox(cwd = "/work", env = {PATH = "{OPT_RUST}/bin:{OPT_CC}/bin"})
-    let ran = box.exec(
-        "{OPT_RUST}/bin/rustc",
-        "--edition",
-        "2021",
-        "-Copt-level=2",
-        "--target",
-        "x86_64-unknown-linux-musl",
-        "-Clinker={cc}",
-        ...default_rustflags("x86_64-unknown-linux-musl"),
-        "-o",
-        "/work/launch",
-        "/work/launch.rs",
-    )
-    = box.file("/work/launch")
-}
-
-# The text of an environment file the launcher reads.
-fn environment(entries: List<{name: String, value: String}>) -> String {
-    = (for each in entries { = "{each.name}={each.value}\u{0}" }).join("")
-}
-
 # --- Building ---
 
 # What a unit came to: its kind, `lib`, `proc-macro`, `bin`, `cdylib`,
@@ -387,7 +321,7 @@ type Built = {
 # build script's link arguments apply to it.
 type CompileSpec = {
     args: List<String>,
-    env: List<{name: String, value: String}>,
+    env: List<Entry<String>>,
     cwd: String,
     placed: List<{at: String, place: Dir | File}>,
     externs: List<{name: String, dir: Dir, file: String}>,
@@ -405,7 +339,7 @@ type CompileSpec = {
 type RunSpec = {
     script: Dir,
     program: String,
-    env: List<{name: String, value: String}>,
+    env: List<Entry<String>>,
     cwd: String,
     placed: List<{at: String, place: Dir | File}>,
     links: List<{links: String, dir: Dir}>,
@@ -413,7 +347,7 @@ type RunSpec = {
 }
 
 # A test program of a member, by its name, with what runs it.
-type RustTest = {name: String, program: File, rust: RustToolchain, launcher: File}
+type RustTest = {name: String, program: File, rust: RustToolchain}
 
 # A unit being built: its number in its graph, its package and that
 # package's settings, what its sandbox holds of its package, and what the
@@ -468,7 +402,6 @@ def tests(ws: RustWorkspace, package: String, features: List<String> = []) -> Li
             name = graph.units[i].target.name
             program = made[i].dir.file(made[i].files[0])
             rust = ws.rust
-            launcher = ws.launcher
         }
     }
 }
@@ -477,21 +410,15 @@ def tests(ws: RustWorkspace, package: String, features: List<String> = []) -> Li
 def run_test(
     test: RustTest,
     given: List<{at: String, place: Dir | File}> = [],
-    env: List<{name: String, value: String}> = [],
+    env: List<Entry<String>> = [],
 ) -> {} {
-    let home = dir(".").path
-    let wrote = fs.write("{home}/env", environment([{name = "PATH"; value = "/usr/bin:/bin"}, ...env]))
-    let made = fs.mkdir("{home}/tmp")
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = test.rust.runtime},
-        {at = "/tmp"; place = dir("{home}/tmp")},
-        {at = "/work/launch"; place = test.launcher},
-        {at = "/work/env"; place = file("{home}/env")},
         {at = "/work/test"; place = test.program},
         ...(for each in given { = {at = each.at; place = each.place} }),
     ]
     let box = fs.compose(placed).sandbox(cwd = "/work")
-    let ran = box.exec("/work/launch", "/work/env", "/work/test")
+    let ran = box.exec("/work/test", env = record([{key = "PATH"; value = "/usr/bin:/bin"}, ...env]))
 }
 
 # The units of the member `package`'s build, or its tests' if `mode` is
@@ -675,7 +602,7 @@ fn compiled(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) 
     }
     = {
         kind = kind
-        dir = compile(ws.rust, ws.launcher, spec)
+        dir = compile(ws.rust, spec)
         files = files
         libraries = libraries
         runs = runs
@@ -736,41 +663,41 @@ fn profile_args(profile: UnitProfile) -> List<String> {
 
 # What Cargo gives rustc's environment for the crate `crate` of `package`'s
 # unit `unit`.
-fn crate_env(ws: RustWorkspace, package: MetaPackage, unit: Unit, crate: String) -> List<{name: String, value: String}> {
+fn crate_env(ws: RustWorkspace, package: MetaPackage, unit: Unit, crate: String) -> List<Entry<String>> {
     let version = package.version.split("+")[0]
     let release = version.split("-")
     let numbers = release[0].split(".")
     let pre = if len(release) > 1 { (for k in 1..len(release) { = release[k] }).join("-") } else { "" }
     let root = path.dirname(package.manifest_path)
     let mut env = [
-        {name = "PATH"; value = "{OPT_RUST}/bin:{OPT_CC}/bin"},
-        {name = "CARGO"; value = "{OPT_RUST}/bin/cargo"},
-        {name = "CARGO_MANIFEST_DIR"; value = root},
-        {name = "CARGO_MANIFEST_PATH"; value = package.manifest_path},
-        {name = "CARGO_PKG_NAME"; value = package.name},
-        {name = "CARGO_PKG_VERSION"; value = package.version},
-        {name = "CARGO_PKG_VERSION_MAJOR"; value = numbers[0]},
-        {name = "CARGO_PKG_VERSION_MINOR"; value = if len(numbers) > 1 { numbers[1] } else { "" }},
-        {name = "CARGO_PKG_VERSION_PATCH"; value = if len(numbers) > 2 { numbers[2] } else { "" }},
-        {name = "CARGO_PKG_VERSION_PRE"; value = pre},
-        {name = "CARGO_PKG_AUTHORS"; value = package.authors.join(":")},
-        {name = "CARGO_PKG_DESCRIPTION"; value = package.description},
-        {name = "CARGO_PKG_HOMEPAGE"; value = package.homepage},
-        {name = "CARGO_PKG_REPOSITORY"; value = package.repository},
-        {name = "CARGO_PKG_LICENSE"; value = package.license},
-        {name = "CARGO_PKG_LICENSE_FILE"; value = package.license_file},
-        {name = "CARGO_PKG_RUST_VERSION"; value = package.rust_version},
-        {name = "CARGO_PKG_README"; value = package.readme},
-        {name = "CARGO_CRATE_NAME"; value = crate},
+        {key = "PATH"; value = "{OPT_RUST}/bin:{OPT_CC}/bin"},
+        {key = "CARGO"; value = "{OPT_RUST}/bin/cargo"},
+        {key = "CARGO_MANIFEST_DIR"; value = root},
+        {key = "CARGO_MANIFEST_PATH"; value = package.manifest_path},
+        {key = "CARGO_PKG_NAME"; value = package.name},
+        {key = "CARGO_PKG_VERSION"; value = package.version},
+        {key = "CARGO_PKG_VERSION_MAJOR"; value = numbers[0]},
+        {key = "CARGO_PKG_VERSION_MINOR"; value = if len(numbers) > 1 { numbers[1] } else { "" }},
+        {key = "CARGO_PKG_VERSION_PATCH"; value = if len(numbers) > 2 { numbers[2] } else { "" }},
+        {key = "CARGO_PKG_VERSION_PRE"; value = pre},
+        {key = "CARGO_PKG_AUTHORS"; value = package.authors.join(":")},
+        {key = "CARGO_PKG_DESCRIPTION"; value = package.description},
+        {key = "CARGO_PKG_HOMEPAGE"; value = package.homepage},
+        {key = "CARGO_PKG_REPOSITORY"; value = package.repository},
+        {key = "CARGO_PKG_LICENSE"; value = package.license},
+        {key = "CARGO_PKG_LICENSE_FILE"; value = package.license_file},
+        {key = "CARGO_PKG_RUST_VERSION"; value = package.rust_version},
+        {key = "CARGO_PKG_README"; value = package.readme},
+        {key = "CARGO_CRATE_NAME"; value = crate},
     ]
     if unit.target.kind.contains("bin") {
-        env := [...env, {name = "CARGO_BIN_NAME"; value = unit.target.name}]
+        env := [...env, {key = "CARGO_BIN_NAME"; value = unit.target.name}]
     }
     if ws.metadata.workspace_members.contains(unit.pkg_id) {
-        env := [...env, {name = "CARGO_PRIMARY_PACKAGE"; value = "1"}]
+        env := [...env, {key = "CARGO_PRIMARY_PACKAGE"; value = "1"}]
     }
     if unit.mode == "test" and unit.target.kind.contains("test") {
-        env := [...env, {name = "CARGO_TARGET_TMPDIR"; value = "/tmp"}]
+        env := [...env, {key = "CARGO_TARGET_TMPDIR"; value = "/tmp"}]
     }
     = env
 }
@@ -808,21 +735,21 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     let cc = "{OPT_CC}/{ws.rust.cc.path.strip_prefix(ws.rust.cc_root.path).strip_prefix("/")}"
     let mut env = [
         ...crate_env(ws, at.package, unit, "build_script_build"),
-        {name = "OUT_DIR"; value = OUT},
-        {name = "TARGET"; value = target},
-        {name = "HOST"; value = HOST},
-        {name = "PROFILE"; value = "release"},
-        {name = "OPT_LEVEL"; value = profile.opt_level},
-        {name = "DEBUG"; value = if debug { "true" } else { "false" }},
-        {name = "NUM_JOBS"; value = "1"},
-        {name = "RUSTC"; value = "{OPT_RUST}/bin/rustc"},
-        {name = "RUSTDOC"; value = "{OPT_RUST}/bin/rustdoc"},
-        {name = "RUSTC_LINKER"; value = cc},
-        {name = "CARGO_ENCODED_RUSTFLAGS"; value = rustflags.join("\u{1f}")},
-        {name = "CARGO_MANIFEST_LINKS"; value = at.package.links},
-        {name = "CC_{target_var}"; value = if host { cc } else { target_cc }},
-        {name = "AR_{target_var}"; value = if host { "{OPT_CC}/bin/{ar_of(cc)}" } else { target_ar }},
-        ...(for each in unit.features { = {name = "CARGO_FEATURE_{upper(each.split("-").join("_"))}"; value = "1"} }),
+        {key = "OUT_DIR"; value = OUT},
+        {key = "TARGET"; value = target},
+        {key = "HOST"; value = HOST},
+        {key = "PROFILE"; value = "release"},
+        {key = "OPT_LEVEL"; value = profile.opt_level},
+        {key = "DEBUG"; value = if debug { "true" } else { "false" }},
+        {key = "NUM_JOBS"; value = "1"},
+        {key = "RUSTC"; value = "{OPT_RUST}/bin/rustc"},
+        {key = "RUSTDOC"; value = "{OPT_RUST}/bin/rustdoc"},
+        {key = "RUSTC_LINKER"; value = cc},
+        {key = "CARGO_ENCODED_RUSTFLAGS"; value = rustflags.join("\u{1f}")},
+        {key = "CARGO_MANIFEST_LINKS"; value = at.package.links},
+        {key = "CC_{target_var}"; value = if host { cc } else { target_cc }},
+        {key = "AR_{target_var}"; value = if host { "{OPT_CC}/bin/{ar_of(cc)}" } else { target_ar }},
+        ...(for each in unit.features { = {key = "CARGO_FEATURE_{upper(each.split("-").join("_"))}"; value = "1"} }),
         ...at.settings.env,
     ]
     if len(ws.libclang) > 0 {
@@ -830,8 +757,8 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         let sysroot = ws.target_c.sysroot.path.strip_prefix(ws.target_c.root.path)
         env := [
             ...env,
-            {name = "LIBCLANG_PATH"; value = OPT_LIBCLANG},
-            {name = "BINDGEN_EXTRA_CLANG_ARGS"; value = "-isystem {OPT_TARGET_CC}/{builtin} --sysroot={OPT_TARGET_CC}{sysroot}"},
+            {key = "LIBCLANG_PATH"; value = OPT_LIBCLANG},
+            {key = "BINDGEN_EXTRA_CLANG_ARGS"; value = "-isystem {OPT_TARGET_CC}/{builtin} --sysroot={OPT_TARGET_CC}{sysroot}"},
         ]
     }
     let spec: RunSpec = {
@@ -845,7 +772,7 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     }
     = {
         kind = "run"
-        dir = run_script(ws.rust, ws.launcher, ws.target_c, ws.libclang, spec)
+        dir = run_script(ws.rust, ws.target_c, ws.libclang, spec)
         runs = []
         given = at.given
     }
@@ -911,8 +838,7 @@ fn upper(text: String): String {
 
 # The crate `spec` says, compiled by rustc: the directory of what it made.
 #[hermetic]
-fn compile(rust: RustToolchain, launcher: File, spec: CompileSpec) -> Dir {
-    let home = dir(".").path
+fn compile(rust: RustToolchain, spec: CompileSpec) -> Dir {
     let mut args = spec.args
     let mut env = spec.env
     for each in spec.externs {
@@ -932,22 +858,19 @@ fn compile(rust: RustToolchain, launcher: File, spec: CompileSpec) -> Dir {
                 args := [...args, "-Clink-arg={each.arg}"]
             }
         }
-        env := [...env, ...own.env, {name = "OUT_DIR"; value = OUT}]
+        env := [...env, ...own.env, {key = "OUT_DIR"; value = OUT}]
     }
-    let wrote = fs.write("{home}/env", environment(env))
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = rust.runtime},
         {at = OPT_RUST; place = rust.root},
         {at = OPT_CC; place = rust.cc_root},
-        {at = "/work/launch"; place = launcher},
-        {at = "/work/env"; place = file("{home}/env")},
         ...(for each in spec.placed { = {at = each.at; place = each.place} }),
         ...(for each in spec.libraries { = {at = each.path; place = each} }),
         ...(for each in spec.runs { = {at = each.path; place = each} }),
         ...(for each in spec.out { = {at = OUT; place = each.dir("out")} }),
     ]
     let box = fs.compose(placed).sandbox(cwd = spec.cwd)
-    let ran = box.exec("/work/launch", "/work/env", "{OPT_RUST}/bin/rustc", ...args, "--out-dir=/work/build")
+    let ran = box.exec("{OPT_RUST}/bin/rustc", ...args, "--out-dir=/work/build", env = record(env))
     = box.dir("/work/build")
 }
 
@@ -956,7 +879,6 @@ fn compile(rust: RustToolchain, launcher: File, spec: CompileSpec) -> Dir {
 #[hermetic]
 fn run_script(
     rust: RustToolchain,
-    launcher: File,
     target_c: toolchain.CToolchain,
     libclang: List<Dir>,
     spec: RunSpec,
@@ -967,10 +889,9 @@ fn run_script(
     for each in spec.links {
         let prefix = "DEP_{upper(each.links.split("-").join("_"))}_"
         for item in said(each.dir).metadata {
-            env := [...env, {name = "{prefix}{upper(item.name.split("-").join("_"))}"; value = item.value}]
+            env := [...env, {key = "{prefix}{upper(item.key.split("-").join("_"))}"; value = item.value}]
         }
     }
-    let wrote = fs.write("{home}/env", environment(env))
     let made = fs.mkdir("{home}/out")
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = rust.runtime},
@@ -978,15 +899,13 @@ fn run_script(
         {at = OPT_CC; place = rust.cc_root},
         {at = OPT_TARGET_CC; place = target_c.root},
         ...(for each in libclang { = {at = OPT_LIBCLANG; place = each} }),
-        {at = "/work/launch"; place = launcher},
-        {at = "/work/env"; place = file("{home}/env")},
         {at = OUT; place = dir("{home}/out")},
         {at = spec.script.path; place = spec.script},
         ...(for each in spec.placed { = {at = each.at; place = each.place} }),
         ...(for each in spec.links { = {at = each.dir.path; place = each.dir} }),
     ]
     let box = fs.compose(placed).sandbox(cwd = spec.cwd)
-    let ran = box.exec("/work/launch", "/work/env", "{spec.script.path}/{spec.program}")
+    let ran = box.exec("{spec.script.path}/{spec.program}", env = record(env))
     for line in ran.stdout.lines() {
         let error = directive(line)
         if error.key == "error" {
@@ -1025,16 +944,16 @@ fn said(run: Dir) -> {
     libs: List<String>,
     search: List<String>,
     cfgs: List<String>,
-    env: List<{name: String, value: String}>,
+    env: List<Entry<String>>,
     link_args: List<{kind: String, arg: String}>,
-    metadata: List<{name: String, value: String}>,
+    metadata: List<Entry<String>>,
 } {
     let mut libs: List<String> = []
     let mut search: List<String> = []
     let mut cfgs: List<String> = []
-    let mut env: List<{name: String, value: String}> = []
+    let mut env: List<Entry<String>> = []
     let mut link_args: List<{kind: String, arg: String}> = []
-    let mut metadata: List<{name: String, value: String}> = []
+    let mut metadata: List<Entry<String>> = []
     let out = "{run.path}/out"
     for line in run.file("output").read().lines() {
         let found = directive(line)
@@ -1051,7 +970,7 @@ fn said(run: Dir) -> {
             cfgs := [...cfgs, "--cfg={value}"]
         } else if found.key == "rustc-env" {
             let pair = value.split("=")
-            env := [...env, {name = pair[0]; value = (for k in 1..len(pair) { = pair[k] }).join("=")}]
+            env := [...env, {key = pair[0]; value = (for k in 1..len(pair) { = pair[k] }).join("=")}]
         } else if found.key == "rustc-link-arg" {
             link_args := [...link_args, {kind = ""; arg = value}]
         } else if found.key == "rustc-link-arg-bins" {
@@ -1065,9 +984,9 @@ fn said(run: Dir) -> {
             link_args := [...link_args, {kind = "cdylib"; arg = value}]
         } else if found.key == "metadata" {
             let pair = value.split("=")
-            metadata := [...metadata, {name = pair[0]; value = (for k in 1..len(pair) { = pair[k] }).join("=")}]
+            metadata := [...metadata, {key = pair[0]; value = (for k in 1..len(pair) { = pair[k] }).join("=")}]
         } else if found.key != "" and not RESERVED.contains(found.key) and not found.key.starts_with("rustc-") {
-            metadata := [...metadata, {name = found.key; value = value}]
+            metadata := [...metadata, {key = found.key; value = value}]
         }
     }
     = {libs = libs; search = search; cfgs = cfgs; env = env; link_args = link_args; metadata = metadata}
@@ -1092,7 +1011,7 @@ fn flags_of(value: String): List<String> {
 # The environment Cargo gives a build script of the configuration `cfg`, as
 # `rustc --print cfg` prints it: `CARGO_CFG_<KEY>`, each key's values
 # joined by commas, a key with none empty.
-fn cfg_env(cfg: String): List<{name: String, value: String}> {
+fn cfg_env(cfg: String): List<Entry<String>> {
     let mut keys: List<String> = []
     let mut values: List<List<String>> = []
     for line in cfg.lines() {
@@ -1112,5 +1031,5 @@ fn cfg_env(cfg: String): List<{name: String, value: String}> {
             values[at] := [...values[at], value]
         }
     }
-    = for k in 0..len(keys) { = {name = "CARGO_CFG_{upper(keys[k])}"; value = values[k].join(",")} }
+    = for k in 0..len(keys) { = {key = "CARGO_CFG_{upper(keys[k])}"; value = values[k].join(",")} }
 }
