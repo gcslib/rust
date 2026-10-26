@@ -36,11 +36,13 @@
 # - `cargo_build(src, vendor, bins)`: the binaries `bins` of the Cargo
 #   workspace `src`, built by `cargo build --release --frozen --offline`
 #   from the crates of `vendor`, for `target`, by default
-#   `x86_64-unknown-linux-musl`, as static position-independent programs,
-#   which need nothing of the system they run on: a directory of each by its
-#   name. The C a crate compiles through `cc`, `zstd-sys`'s say, is compiled
-#   for the target by `target_c`, by default the gcc library's musl
-#   toolchain, which a static musl program needs. `beside` are directories
+#   `x86_64-unknown-linux-musl`: a directory of each by its name. Its
+#   `rustflags` follow the target unless given: for a musl target, static
+#   position-independent programs, which need nothing of the system they run
+#   on, and none for any other. The C a crate compiles through `cc`,
+#   `zstd-sys`'s say, is compiled for the target by `target_c`, by default
+#   the gcc library's musl toolchain for a musl target, which a static musl
+#   program needs, and the registered C toolchain for any other. `beside` are directories
 #   the source takes by their paths, each placed at its path, `at`, beside
 #   the source as `../AT` reaches it: another repository's crate, say.
 #   `libs` are libraries it builds to give besides the binaries,
@@ -67,6 +69,9 @@ type GitCrate = {name: String, version: String, source: String, url: String, com
 type Vendored = {crates: Dir, git: List<GitCrate>}
 
 let DIST = "https://static.rust-lang.org/dist"
+
+# The target of the machine builds run on, which builds scripts for.
+let HOST = "x86_64-unknown-linux-gnu"
 
 # Where a build's sandbox has the toolchain, and the C compiler that links.
 let OPT_RUST = "/opt/rust"
@@ -295,6 +300,24 @@ fn vendor(
     = fs.compose(flat)
 }
 
+# The flags a build for `target` takes unless given: static,
+# position-independent programs for a musl target, which need nothing of the
+# system they run on, and none for any other.
+fn default_rustflags(target: String) -> List<String> {
+    = if target.ends_with("-musl") {
+        ["-Crelocation-model=pic", "-Clink-self-contained=yes", "-Clink-arg=-static-pie"]
+    } else {
+        []
+    }
+}
+
+# The C toolchain that compiles a crate's C for `target` unless one is
+# given: the gcc library's musl toolchain for a musl target, else the
+# registered C toolchain.
+fn default_target_c(target: String) -> toolchain.CToolchain {
+    = if target.ends_with("-musl") { gcc_x86_64_musl() } else { toolchain.get(Toolchain::C) }
+}
+
 # The directory of the C compiler's own headers, `stddef.h`'s, in the C
 # toolchain `c`, from its install's root: what `cc -print-file-name=include`
 # says.
@@ -314,13 +337,13 @@ def cargo_build(
     bins: List<String>,
     target: String = "x86_64-unknown-linux-musl",
     packages: List<String> = [],
-    rustflags: List<String> = ["-Crelocation-model=pic", "-Clink-self-contained=yes", "-Clink-arg=-static-pie"],
+    rustflags: List<String> = default_rustflags(target),
     beside: List<{at: String, place: Dir}> = [],
     libs: List<String> = [],
     env: List<{name: String, value: String}> = [],
     libclang: List<Dir> = [],
     rust: RustToolchain = toolchain.get(Toolchain::Rust),
-    target_c: toolchain.CToolchain = musl_x86_64(),
+    target_c: toolchain.CToolchain = default_target_c(target),
 ) -> Dir {
     let home = dir(".").path
     let config = "{home}/config.toml"
@@ -366,10 +389,13 @@ def cargo_build(
         given := "{given}LIBCLANG_PATH = \"{OPT_LIBCLANG}\"\n\
                   BINDGEN_EXTRA_CLANG_ARGS = \"-isystem {OPT_TARGET_CC}/{builtin} --sysroot={OPT_TARGET_CC}{sysroot}\"\n"
     }
+    # The build's own machine links build scripts with the same compiler;
+    # a target that is that machine has the one section.
+    let host = if target == HOST { "" } else { "[target.{HOST}]\nlinker = \"{cc}\"\n" }
     let written = fs.write(
         config,
         "[source.crates-io]\nreplace-with = \"vendored\"\n{git_sources}[source.vendored]\ndirectory = \"/work/vendor\"\n\
-         [target.{target}]\nlinker = \"{cc}\"\n[target.x86_64-unknown-linux-gnu]\nlinker = \"{cc}\"\n\
+         [target.{target}]\nlinker = \"{cc}\"\n{host}\
          [env]\nCC_{target_var} = \"{target_cc}\"\nAR_{target_var} = \"{target_ar}\"\n{given}\
          [build]\nrustflags = [{quoted_flags}]\n",
     )

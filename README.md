@@ -38,7 +38,9 @@ def build app() {
 - `vendored(lock)`: every crate `lock` pins, from crates.io by its checksum
   or from a git repository by its commit, laid out as `cargo vendor` does.
 - `cargo_build(src, vendor, bins)`: the binaries `bins` of a Cargo
-  workspace, by default static musl programs.
+  workspace, by default static musl programs. Give `target =
+  "x86_64-unknown-linux-gnu"` for programs linked against glibc; the
+  flags and the C compiler for crates' C follow the target.
 - `crates(lock)` and `git_crates(lock)`: the crates a lock file pins.
 
 It needs the [gcc](https://github.com/gcslib/gcc) and
