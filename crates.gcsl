@@ -609,10 +609,12 @@ fn compiled(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) 
         }
         externs := [...externs, {name = dep.extern_crate_name; dir = given.dir; file = given.files[0]}]
         libraries := [...libraries, dep.index]
+        # A proc macro runs in the compiler: what it links is none of the
+        # crate's to search.
         if given.kind != "proc-macro" {
             libraries := [...libraries, ...given.libraries]
+            runs := [...runs, ...given.runs]
         }
-        runs := [...runs, ...given.runs]
     }
     libraries := libraries.unique()
     runs := runs.unique()
@@ -690,18 +692,13 @@ fn artifacts(kind: String, crate: String, types: List<String>) -> List<String> {
     if kind == "proc-macro" {
         return ["lib{crate}.so"]
     }
-    let mut files: List<String> = []
-    for each in types {
-        let made = if each == "lib" or each == "rlib" {
-            "lib{crate}.rlib"
-        } else if each == "staticlib" {
-            "lib{crate}.a"
-        } else {
-            "lib{crate}.so"
-        }
-        files := [...files, made]
+    # The Rust library first, which its dependents link with, whatever
+    # order the manifest names the types in.
+    let rust = for each in types if each == "lib" or each == "rlib" { = "lib{crate}.rlib" }
+    let others = for each in types if each != "lib" and each != "rlib" {
+        = if each == "staticlib" { "lib{crate}.a" } else { "lib{crate}.so" }
     }
-    = files
+    = [...rust, ...others]
 }
 
 # What rustc is told of the profile `profile`, as Cargo tells it.
