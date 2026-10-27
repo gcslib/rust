@@ -171,50 +171,66 @@ fn installed(rustc: Dir, cargo: Dir, std: List<Dir>, zlib: Dir) -> Dir {
     = fs.compose(entries)
 }
 
-# Each `[[package]]` block of the `Cargo.lock` file `lock`, as a lookup of
-# its keys' quoted values; the first, before any, is left out.
-fn packages(lock: File) -> List<fn(String) -> String> {
+# A `[[package]]` block of a `Cargo.lock` file: the value of each key a
+# lock's crates are read by, the last if it has several, `""` if none.
+type LockPackage = {name: String, version: String, source: String, checksum: String}
+
+# Each `[[package]]` block of the `Cargo.lock` file `lock`; what is before
+# the first is left out. Memoised, so that a build reads and splits the lock
+# once, however often its targets' code runs.
+fn packages(lock: File) ->> List<LockPackage> {
     let blocks = lock.read().split("[[package]]")
-    let mut found: List<fn(String) -> String> = []
+    let mut found: List<LockPackage> = []
     let mut first = true
     for block in blocks {
         if first {
             first := false
             continue
         }
-        let value = fn(key: String) -> String {
-            let mut seen = ""
-            for line in block.lines() {
-                if line.starts_with("{key} = \"") {
-                    seen := line.strip_prefix("{key} = \"").strip_suffix("\"")
-                }
+        let mut name = ""
+        let mut version = ""
+        let mut source = ""
+        let mut checksum = ""
+        for line in block.lines() {
+            let halves = line.split(" = \"")
+            if len(halves) != 2 {
+                continue
             }
-            = seen
+            let value = halves[1].strip_suffix("\"")
+            if halves[0] == "name" {
+                name := value
+            } else if halves[0] == "version" {
+                version := value
+            } else if halves[0] == "source" {
+                source := value
+            } else if halves[0] == "checksum" {
+                checksum := value
+            }
         }
-        found := [...found, value]
+        found := [...found, {name = name; version = version; source = source; checksum = checksum}]
     }
     = found
 }
 
-def crates(lock: File) -> List<Crate> {
+def crates(lock: File) ->> List<Crate> {
     let mut found: List<Crate> = []
-    for value in packages(lock) {
-        let source = value("source")
+    for package in packages(lock) {
+        let source = package.source
         if source == "" or source.starts_with("git+") {
             continue
         }
         if not source.starts_with("registry+https://github.com/rust-lang/crates.io-index") {
-            panic("`{value("name")}` {value("version")} is from `{source}`: only crates of crates.io, pinned by a checksum, and of git repositories, pinned by a commit, are")
+            panic("`{package.name}` {package.version} is from `{source}`: only crates of crates.io, pinned by a checksum, and of git repositories, pinned by a commit, are")
         }
-        found := [...found, {name = value("name"); version = value("version"); checksum = value("checksum")}]
+        found := [...found, {name = package.name; version = package.version; checksum = package.checksum}]
     }
     = found
 }
 
-def git_crates(lock: File) -> List<GitCrate> {
+def git_crates(lock: File) ->> List<GitCrate> {
     let mut found: List<GitCrate> = []
-    for value in packages(lock) {
-        let pinned = value("source")
+    for package in packages(lock) {
+        let pinned = package.source
         if not pinned.starts_with("git+") {
             continue
         }
@@ -224,7 +240,7 @@ def git_crates(lock: File) -> List<GitCrate> {
         let source = halves[0]
         let commit = if len(halves) == 2 { halves[1] } else { "" }
         let url = source.strip_prefix("git+").split("?")[0]
-        found := [...found, {name = value("name"); version = value("version"); source = source; url = url; commit = commit}]
+        found := [...found, {name = package.name; version = package.version; source = source; url = url; commit = commit}]
     }
     = found
 }
