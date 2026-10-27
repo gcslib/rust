@@ -24,8 +24,9 @@
 #   compiles and those of every crate that depends on it, a library a build
 #   script links with, say.
 # - `bin(ws, package, name)`: the program `name` of the member `package`,
-#   by default its own name; `library(ws, package)`: its shared or static
-#   library, `cdylib` or `staticlib`.
+#   by default its own name; `library(ws, package)`: its shared library,
+#   its `cdylib`; `static_library(ws, package)`: its static archive, its
+#   `staticlib`.
 # - `tests(ws, package)`: the test programs of the member `package`, its
 #   unit tests and each integration test, with `features` too if given, as
 #   `cargo test --features` builds them: a `RustTest` each, by its name;
@@ -203,7 +204,7 @@ fn skeleton_of(src: Dir, ignore: List<String>) ->> Skeleton {
 # A sandbox of the toolchain, the skeleton of a workspace at `/work/src`
 # and its vendored crates, in which Cargo plans a build for `target`.
 fn planned_in(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, target: String) -> Sandbox {
-    let home = dir(".").path
+    let home = working_dir().path
     let empty = "{home}/empty"
     let made = fs.write(empty, "")
     let config = "{home}/config.toml"
@@ -246,7 +247,7 @@ fn cargo_metadata(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, tar
         "--filter-platform",
         target,
     )
-    let at = "{dir(".").path}/metadata.json"
+    let at = "{working_dir().path}/metadata.json"
     let wrote = fs.write(at, ran.stdout)
     = file(at)
 }
@@ -281,7 +282,7 @@ fn unit_graph(
         package,
         ...chosen,
     )
-    let at = "{dir(".").path}/{mode}.json"
+    let at = "{working_dir().path}/{mode}.json"
     let wrote = fs.write(at, ran.stdout)
     = file(at)
 }
@@ -291,7 +292,7 @@ fn unit_graph(
 fn rustc_cfg(rust: RustToolchain, target: String, flags: List<String> = []) -> File {
     let box = fs.compose([{at = "/"; place = rust.runtime}, {at = OPT_RUST; place = rust.root}]).sandbox(cwd = "/")
     let ran = box.exec("{OPT_RUST}/bin/rustc", "--print", "cfg", "--target", target, ...flags)
-    let at = "{dir(".").path}/cfg.txt"
+    let at = "{working_dir().path}/cfg.txt"
     let wrote = fs.write(at, ran.stdout)
     = file(at)
 }
@@ -394,19 +395,29 @@ def bin(ws: RustWorkspace, package: String, name: String = package) -> File {
 }
 
 def library(ws: RustWorkspace, package: String) -> File {
+    = linked(ws, package, "cdylib", ".so")
+}
+
+def static_library(ws: RustWorkspace, package: String) -> File {
+    = linked(ws, package, "staticlib", ".a")
+}
+
+# The library of the crate type `kind` of the member `package`, whose file
+# ends with `suffix`: one compile makes every crate type its manifest names,
+# as Cargo does.
+fn linked(ws: RustWorkspace, package: String, kind: String, suffix: String) -> File {
     let graph = planned(ws, package, "build")
     let mut root = -1
     for i in 0..len(graph.units) {
-        let kinds = graph.units[i].target.crate_types
-        if graph.units[i].mode == "build" and (kinds.contains("cdylib") or kinds.contains("staticlib")) {
+        if graph.units[i].mode == "build" and graph.units[i].target.crate_types.contains(kind) {
             root := i
         }
     }
     if root < 0 {
-        panic("the member `{package}` has no shared or static library")
+        panic("the member `{package}` has no `{kind}` library")
     }
     let made = built(ws, graph, [root])
-    let found = for each in made[root].files if each.ends_with(".so") or each.ends_with(".a") { = each }
+    let found = for each in made[root].files if each.ends_with(suffix) { = each }
     = made[root].dir.file(found[0])
 }
 
@@ -900,7 +911,7 @@ fn run_script(
     libclang: List<Dir>,
     spec: RunSpec,
 ) -> Dir {
-    let home = dir(".").path
+    let home = working_dir().path
     let mut env = spec.env
     env := [...env, ...cfg_env(spec.cfg.read())]
     for each in spec.links {

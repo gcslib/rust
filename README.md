@@ -53,8 +53,8 @@ with the same features, share them.
   beside them that they read (`data`), environment variables (`env`), and
   files placed for them and everything that depends on them (`given`), a
   native library a build script links, say.
-- `bin(ws, package)`, `library(ws, package)`: a member's program, and its
-  shared or static library.
+- `bin(ws, package)`, `library(ws, package)`, `static_library(ws,
+  package)`: a member's program, its shared library and its static archive.
 - `tests(ws, package)`: a member's test programs, with `features` if
   given; `run_test(test)` runs one.
 - `cargo_build(src, vendor, bins)`: the binaries `bins` of a Cargo

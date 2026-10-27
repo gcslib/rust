@@ -278,7 +278,7 @@ fn vendor(
     fetched: List<{crate: Crate, tree: Dir}>,
     repositories: List<{crate: GitCrate, repository: Dir}>,
 ) -> Dir {
-    let records = dir(".").path
+    let records = working_dir().path
     # A git crate's record names no checksum: its commit pins it.
     let git_record = "{records}/git.json"
     let wrote = fs.write(git_record, "{{\"files\": {{}}, \"package\": null}}")
@@ -376,7 +376,7 @@ def cargo_build(
     rust: RustToolchain = toolchain.get(Toolchain::Rust),
     target_c: toolchain.CToolchain = default_target_c(target),
 ) -> Dir {
-    let home = dir(".").path
+    let home = working_dir().path
     let config = "{home}/config.toml"
     let cc = "{OPT_CC}/{rust.cc.path.strip_prefix(rust.cc_root.path).strip_prefix("/")}"
     # The C of a crate for the target, its build script's through `cc`,
