@@ -296,6 +296,23 @@ fn rustc_cfg(rust: RustToolchain, target: String, flags: List<String> = []) -> F
     = file(at)
 }
 
+# --- Environments ---
+
+# The environment of `entries`, a variable named twice taking its last
+# value, as Cargo's does when a build script's `rustc-env` names one it set.
+fn environment(entries: List<Entry<String>>) -> {*: String} {
+    let mut kept: List<Entry<String>> = []
+    let mut seen: List<String> = []
+    for i in 0..len(entries) {
+        let each = entries[len(entries) - 1 - i]
+        if not seen.contains(each.key) {
+            seen := [...seen, each.key]
+            kept := [each, ...kept]
+        }
+    }
+    = record(kept)
+}
+
 # --- Building ---
 
 # What a unit came to: its kind, `lib`, `proc-macro`, `bin`, `cdylib`,
@@ -418,7 +435,7 @@ def run_test(
         ...(for each in given { = {at = each.at; place = each.place} }),
     ]
     let box = fs.compose(placed).sandbox(cwd = "/work")
-    let ran = box.exec("/work/test", env = record([{key = "PATH"; value = "/usr/bin:/bin"}, ...env]))
+    let ran = box.exec("/work/test", env = environment([{key = "PATH"; value = "/usr/bin:/bin"}, ...env]))
 }
 
 # The units of the member `package`'s build, or its tests' if `mode` is
@@ -870,7 +887,7 @@ fn compile(rust: RustToolchain, spec: CompileSpec) -> Dir {
         ...(for each in spec.out { = {at = OUT; place = each.dir("out")} }),
     ]
     let box = fs.compose(placed).sandbox(cwd = spec.cwd)
-    let ran = box.exec("{OPT_RUST}/bin/rustc", ...args, "--out-dir=/work/build", env = record(env))
+    let ran = box.exec("{OPT_RUST}/bin/rustc", ...args, "--out-dir=/work/build", env = environment(env))
     = box.dir("/work/build")
 }
 
@@ -905,7 +922,7 @@ fn run_script(
         ...(for each in spec.links { = {at = each.dir.path; place = each.dir} }),
     ]
     let box = fs.compose(placed).sandbox(cwd = spec.cwd)
-    let ran = box.exec("{spec.script.path}/{spec.program}", env = record(env))
+    let ran = box.exec("{spec.script.path}/{spec.program}", env = environment(env))
     for line in ran.stdout.lines() {
         let error = directive(line)
         if error.key == "error" {
