@@ -180,23 +180,35 @@ def workspace(
 # those under a hidden directory, Cargo's own among them, or one of
 # `ignore` at the top, a build's outputs.
 fn skeleton_of(src: Dir, ignore: List<String>) ->> Skeleton {
-    let mut manifests: List<{at: String, place: File}> = []
-    let mut paths: List<String> = []
-    for each in src.files() {
-        let at = each.path.strip_prefix(src.path).strip_prefix("/")
-        let name = path.basename(at)
-        let top = at.split("/")[0]
-        let hidden = (for part in at.split("/") if part.starts_with(".") and part != ".cargo" { = part }).len() > 0
-        if hidden or ignore.contains(top) {
-            continue
-        }
-        if name == "Cargo.toml" or name == "Cargo.lock" or at.starts_with(".cargo/") {
-            manifests := [...manifests, {at = at; place = each}]
-        } else {
-            paths := [...paths, at]
-        }
+    let found = for each in src.files() {
+        = {at = each.path.strip_prefix(src.path).strip_prefix("/"); place = each}
     }
-    = {manifests = manifests; paths = paths}
+    # `ignore` first: a build's outputs, pekit's among them, are most of the
+    # files.
+    let kept = for each in found if not ignore.contains(each.at.split("/")[0]) and not hidden(each.at) {
+        = each
+    }
+    = {
+        manifests = for each in kept if is_manifest(each.at) { = each }
+        paths = for each in kept if not is_manifest(each.at) { = each.at }
+    }
+}
+
+# Whether the path `at` is under a hidden directory, or is a hidden file,
+# but for Cargo's own configuration, `.cargo`.
+fn hidden(at: String) -> Bool {
+    # Most paths have no part to look at: only one that begins with `.`.
+    if not at.starts_with(".") and not at.contains("/.") {
+        return false
+    }
+    = (for part in at.split("/") if part.starts_with(".") and part != ".cargo" { = part }).len() > 0
+}
+
+# Whether the path `at` is one of the files Cargo plans by: a manifest, a
+# lock, or `.cargo` configuration.
+fn is_manifest(at: String) -> Bool {
+    let name = path.basename(at)
+    = name == "Cargo.toml" or name == "Cargo.lock" or at.starts_with(".cargo/")
 }
 
 # --- Planning ---
