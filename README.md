@@ -46,7 +46,10 @@ with the same features, share them.
   standard libraries for `x86_64-unknown-linux-gnu` and
   `x86_64-unknown-linux-musl`.
 - `vendored(lock)`: every crate `lock` pins, from crates.io by its checksum
-  or from a git repository by its commit, laid out as `cargo vendor` does.
+  or from a git repository by its commit, laid out as `cargo vendor` does. A git crate from a repository the workspace also imports a library from
+  must be at the commit the host pinned that library at
+  (`libraries.pinned_libraries`), or the build fails saying which to update:
+  the crates and the settings the library gives them are of one commit.
 - `workspace(src, vendor)`: a Cargo workspace, planned by Cargo for
   `target`, by default `x86_64-unknown-linux-gnu`. Give `crates` the
   settings of packages that need more than their manifests say: files

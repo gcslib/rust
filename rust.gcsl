@@ -32,7 +32,11 @@
 #   version; and `git`, the git sources, for Cargo to find in it. A git
 #   crate whose manifest takes a value from its workspace's, `version.
 #   workspace = true` say, is an error: its manifest would need rewriting,
-#   as `cargo vendor` does, to build on its own.
+#   as `cargo vendor` does, to build on its own. So is a git crate of a
+#   repository the workspace also imports a library from at another
+#   commit than its host pinned the library at (`libraries`'s
+#   `pinned_libraries`): the library's settings for the crate and the crate
+#   must be of one commit.
 # - `cargo_build(src, vendor, bins)`: the binaries `bins` of the Cargo
 #   workspace `src`, built by `cargo build --release --frozen --offline`
 #   from the crates of `vendor`, for `target`, by default
@@ -61,6 +65,7 @@
 # `crates.gcsl` builds a workspace one crate at a time instead: see its
 # `workspace`.
 import fs
+import libraries
 import unpack from archive
 import toolchain
 import Toolchain from toolchain
@@ -225,6 +230,7 @@ def git_crates(lock: File) -> List<GitCrate> {
 }
 
 def vendored(lock: File) -> Vendored {
+    let pins_agree = agreed(git_crates(lock))
     let fetched = for each in crates(lock) {
         let archive = fetch(
             "https://static.crates.io/crates/{each.name}/{each.name}-{each.version}.crate",
@@ -237,6 +243,32 @@ def vendored(lock: File) -> Vendored {
         = {crate = each; repository = fetch_git(each.url, each.commit)}
     }
     = {crates = vendor(fetched, repositories); git = git}
+}
+
+# Fails unless each of `git`, a lock's git crates, from a repository the
+# workspace also imports a library from is at the commit its host pinned
+# the library at: the crate and the library, a crate's build settings say,
+# must be of one commit, and only a person can say which moves.
+fn agreed(git: List<GitCrate>, ^pinned_libraries) -> {} {
+    for each in git {
+        for pin in pinned_libraries {
+            if same_repository(each.url, pin.git) and each.commit != pin.commit {
+                panic(
+                    "`Cargo.lock` pins `{each.name}` at `{each.commit}` of `{each.url}`, but `pekit.lock` pins \
+                     the library `{pin.path}` from the same repository at `{pin.commit}`: update one, \
+                     `cargo update -p {each.name}` or `pekit lock --update`, so that both are the same commit",
+                )
+            }
+        }
+    }
+    = {}
+}
+
+# Whether the git URLs `a` and `b` name one repository: equal but for a
+# `.git` or `/` at the end.
+fn same_repository(a: String, b: String) -> Bool {
+    let bare = fn(url: String) -> String { = url.strip_suffix("/").strip_suffix(".git") }
+    = bare(a) == bare(b)
 }
 
 # The directory of the crate `name` in the repository files `repository`,
