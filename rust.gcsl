@@ -4,7 +4,8 @@
 # - `Toolchain::Rust`: a Rust toolchain, a `RustToolchain`: `root`, rustc,
 #   Cargo and the standard libraries of its targets, laid out as one
 #   install; `runtime`, a root they run on; `cc`, the C compiler that links
-#   what rustc compiles, and `cc_root`, its install.
+#   what rustc compiles, and `cc_root`, its install; `clippy`, Clippy's
+#   component, whose `bin/clippy-driver` runs with `root`'s libraries.
 # - `rust_1_98`: Rust 1.98.1 from static.rust-lang.org, each part pinned by
 #   its SHA-256, with the standard libraries of `x86_64-unknown-linux-gnu`
 #   and `x86_64-unknown-linux-musl`, running on the gcc library's Bootlin
@@ -80,7 +81,7 @@ import Toolchain from toolchain
 import * from "github.com/gcslib/gcc"
 import * from "github.com/gcslib/buildenv"
 
-type RustToolchain = {root: Dir, runtime: Dir, cc: File, cc_root: Dir}
+type RustToolchain = {root: Dir, runtime: Dir, cc: File, cc_root: Dir, clippy: Dir}
 
 enum Toolchain::Rust<RustToolchain>
 
@@ -140,6 +141,11 @@ def Toolchain::Rust rust_1_98() {
         runtime = linker.runtime
         cc = linker.cc
         cc_root = linker.root
+        clippy = part(
+            "clippy",
+            "clippy-preview",
+            "e167f333be24e1d5eea56ea563c7def0aa0bd613f5ce3445976c93b0288799d1",
+        )
     }
 }
 
