@@ -29,7 +29,9 @@
 #   fetched by their checksums and unpacked, and those of a git repository
 #   its directory in the repository's files at its commit, found by its
 #   manifest's name and given whole, for Cargo to find each by its name and
-#   version; and `git`, the git sources, for Cargo to find in it. A git
+#   version; `git`, the git sources, for Cargo to find in it; and `locals`,
+#   each package of no source, the workspace's own and those it takes by
+#   their paths, as `NAME@VERSION`. A git
 #   crate whose manifest takes a value from its workspace's, `version.
 #   workspace = true` say, is an error: its manifest would need rewriting,
 #   as `cargo vendor` does, to build on its own. So is a git crate of a
@@ -55,6 +57,12 @@
 #   a build script's bindgen loads, for which it is given too the target C
 #   toolchain's own headers and sysroot to parse with. A hermetic step: Cargo runs in a sandbox of the toolchain's
 #   runtime, with the toolchain, the source and the crates, and nothing else.
+#   Its target directory is in the step's `#[scratch]` directory, so that a
+#   build after a change to the source compiles the crates of `vendor` no
+#   more. Cargo tells a changed file by its modification time, which a
+#   file put back as it was can make older than its last build, so each
+#   package of `vendor.locals` is cleaned first and always compiled again.
+#   A crate of `vendor`, by its name, version and source, never changes.
 # - `cargo_sources(vendor)`: the sections of Cargo's configuration that
 #   make it take every crate from `vendor`, as `cargo vendor` prints them.
 # - `default_rustflags(target)`, `default_target_c(target)`: the flags and
@@ -80,7 +88,7 @@ type Crate = {name: String, version: String, checksum: String}
 
 type GitCrate = {name: String, version: String, source: String, url: String, commit: String}
 
-type Vendored = {crates: Dir, git: List<GitCrate>}
+type Vendored = {crates: Dir, git: List<GitCrate>, locals: List<String>}
 
 let DIST = "https://static.rust-lang.org/dist"
 
@@ -97,6 +105,9 @@ let OPT_TARGET_CC = "/opt/target-cc"
 
 # Where a build's sandbox has the libclang its build scripts' bindgen loads.
 let OPT_LIBCLANG = "/opt/libclang"
+
+# Where `cargo_build` keeps Cargo's target directory between its runs.
+let SCRATCH_TARGET = "/pekit-scratch/target"
 
 def Toolchain::Rust rust_1_98() {
     let gcc = (Toolchain::C gcc_x86_64)().made()
@@ -258,7 +269,13 @@ def vendored(lock: File) -> Vendored {
     let repositories = for each in git {
         = {crate = each; repository = fetch_git(each.url, each.commit)}
     }
-    = {crates = vendor(fetched, repositories); git = git}
+    let mut locals: List<String> = []
+    for package in packages(lock) {
+        if package.source == "" {
+            locals := [...locals, "{package.name}@{package.version}"]
+        }
+    }
+    = {crates = vendor(fetched, repositories); git = git; locals = locals}
 }
 
 # Fails unless each of `git`, a lock's git crates, from a repository the
@@ -410,6 +427,7 @@ def cargo_sources(vendor: Vendored): String {
 }
 
 #[hermetic]
+#[scratch]
 def cargo_build(
     src: Dir,
     vendor: Vendored,
@@ -477,14 +495,21 @@ def cargo_build(
             PATH = "{OPT_RUST}/bin:{OPT_CC}/bin"
             HOME = "/work/home"
             CARGO_HOME = "/work/home"
-            CARGO_TARGET_DIR = "/work/target"
+            CARGO_TARGET_DIR = SCRATCH_TARGET
         },
     )
+    let mut cleaned = ["clean", "--release", "--frozen", "--offline", "--target", target]
+    for spec in vendor.locals {
+        cleaned := [...cleaned, "-p", spec]
+    }
+    # With no package named, `cargo clean` would clean every crate.
+    let cleaning: List<List<String>> = if len(vendor.locals) > 0 { [cleaned] } else { [] }
+    let clean = for each in cleaning { = box.exec("{OPT_RUST}/bin/cargo", ...each) }
     let chosen = for name in packages { = ["-p", name] }
     let mut words = ["build", "--release", "--frozen", "--offline", "--target", target]
     for pair in chosen {
         words := [...words, ...pair]
     }
     let built = box.exec("{OPT_RUST}/bin/cargo", ...words)
-    = fs.compose(for name in [...bins, ...libs] { = {at = name; place = box.file("/work/target/{target}/release/{name}")} })
+    = fs.compose(for name in [...bins, ...libs] { = {at = name; place = file("{SCRATCH_TARGET}/{target}/release/{name}")} })
 }
