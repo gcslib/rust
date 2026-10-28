@@ -44,7 +44,7 @@ with the same features, share them.
 
 - `rust_1_98`: Rust 1.98.1, each part pinned by its SHA-256, with the
   standard libraries for `x86_64-unknown-linux-gnu` and
-  `x86_64-unknown-linux-musl`.
+  `x86_64-unknown-linux-musl`, and Clippy.
 - `vendored(lock)`: every crate `lock` pins, from crates.io by its checksum
   or from a git repository by its commit, laid out as `cargo vendor` does. A git crate from a repository the workspace also imports a library from
   must be at the commit the host pinned that library at
@@ -59,7 +59,12 @@ with the same features, share them.
 - `bin(ws, package)`, `library(ws, package)`, `static_library(ws,
   package)`: a member's program, its shared library and its static archive.
 - `tests(ws, package)`: a member's test programs, with `features` if
-  given; `run_test(test)` runs one.
+  given; `run_test(test)` runs one, with `args` if given.
+- `doctests(ws, package)`: a member's documentation tests, run by rustdoc
+  as `cargo test --doc` runs them, each crate's a step.
+- `clippy(ws, package)`: Clippy's checks of a member, as `cargo clippy
+  --all-targets` makes them, each crate a step, with `flags` after its
+  lints, `-Dwarnings` say.
 - `cargo_build(src, vendor, bins)`: the binaries `bins` of a Cargo
   workspace, built whole by Cargo in one step, by default static musl
   programs. Give `target = "x86_64-unknown-linux-gnu"` for programs linked
@@ -70,8 +75,14 @@ with the same features, share them.
   `builtin_headers(c)`: the flags and the C toolchain a build for `target`
   takes unless given, and where a C toolchain's own headers are.
 
-It needs the [gcc](https://github.com/gcslib/gcc) and
-[buildenv](https://github.com/gcslib/buildenv) libraries.
+A member's crates are compiled with what Cargo takes from its manifest and
+its plans leave out: its `[lints]`, its `--check-cfg` flags and which of its
+targets have no test harness, which `manifests.py` reads, and link-time
+optimization worked out per crate as Cargo works it out.
+
+It needs the [gcc](https://github.com/gcslib/gcc),
+[buildenv](https://github.com/gcslib/buildenv) and
+[python](https://github.com/gcslib/python) libraries.
 
 The comments at the top of `rust.gcsl` and `crates.gcsl` document each in
 full.

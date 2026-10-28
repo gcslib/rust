@@ -31,8 +31,21 @@
 #   unit tests and each integration test, with `features` too if given, as
 #   `cargo test --features` builds them: a `RustTest` each, by its name;
 #   `run_test(test)` runs one, a step, in a sandbox of the toolchain's
-#   runtime with a writable `/tmp`, `given` placed at their paths and `env`
-#   set, and fails if it does.
+#   runtime with a writable `/tmp`, `given` placed at their paths, `env`
+#   set and `args` its arguments, and fails if it does.
+# - `doctests(ws, package)`: the tests of the member `package`'s
+#   documentation, each crate's run by rustdoc as a step, as `cargo test
+#   --doc` runs them, with `given` and `env` as `run_test` has them; none
+#   for a member with no library whose documentation is tested.
+# - `clippy(ws, package)`: Clippy's checks of the member `package`, as
+#   `cargo clippy --all-targets` checks it, each of its crates a step,
+#   `flags` given after the lints, `-Dwarnings` say. A check fails as its
+#   compile would, so a lint denied fails it.
+#
+# A member's crates are compiled with what Cargo takes from its manifest
+# that its plans omit, as `manifests.py` reads it with the python library's
+# pinned Python: its `[lints]`, or its workspace's, its `--check-cfg`
+# flags, and which of its targets have no test harness.
 #
 # Each step's sandbox holds the toolchain, the crate's own directory, at its
 # path in the workspace or among the vendored crates, and what it is given,
@@ -46,6 +59,8 @@ import json
 import path
 import toolchain
 import Toolchain from toolchain
+import Toolchain::Python python_3_14 from "github.com/gcslib/python"
+import PythonToolchain from "github.com/gcslib/python"
 
 # Where a step's sandbox has the toolchain, the C compiler that links, the
 # target's C toolchain and libclang, as `cargo_build`'s has them.
@@ -56,6 +71,9 @@ let OPT_CC = "/opt/cc"
 let OPT_TARGET_CC = "/opt/target-cc"
 
 let OPT_LIBCLANG = "/opt/libclang"
+
+# Where the step that reads the manifests has Python.
+let OPT_PYTHON = "/opt/python"
 
 # Where a step's sandbox has the workspace, the vendored crates, and the
 # output directory of the build script that runs there or whose crate is
@@ -127,6 +145,16 @@ type Unit = {
 
 type UnitGraph = {units: List<Unit>, roots: List<Int>}
 
+# What Cargo takes from a member's manifest that its plans omit, as
+# `manifests.py` describes it.
+type PackageFacts = {
+    id: String,
+    lints: List<String>,
+    check_cfg: List<String>,
+    plain: List<{kind: String, name: String}>,
+    doctest: Bool,
+}
+
 # The manifests and lock of a workspace, which planning reads, each placed
 # at its path, and the path of every other file, which it is given empty.
 type Skeleton = {manifests: List<{at: String, place: File}>, paths: List<String>}
@@ -142,6 +170,7 @@ type RustWorkspace = {
     target_c: toolchain.CToolchain,
     skeleton: Skeleton,
     metadata: Metadata,
+    facts: List<PackageFacts>,
     target_cfg: File,
     host_cfg: File,
 }
@@ -156,9 +185,12 @@ def workspace(
     ignore: List<String> = ["target", "pekit-out"],
     rust: RustToolchain = toolchain.get(Toolchain::Rust),
     target_c: toolchain.CToolchain = default_target_c(target),
+    python: PythonToolchain = pinned_python(),
 ) ->> RustWorkspace {
     let skeleton = skeleton_of(src, ignore)
-    let metadata: Metadata = json.decode(cargo_metadata(rust, skeleton, vendor, target).read())
+    let described = cargo_metadata(rust, skeleton, vendor, target)
+    let metadata: Metadata = json.decode(described.read())
+    let facts: List<PackageFacts> = json.decode(manifest_facts(python, skeleton, described, file("manifests.py")).read())
     = {
         src = src
         vendor = vendor
@@ -170,9 +202,17 @@ def workspace(
         target_c = target_c
         skeleton = skeleton
         metadata = metadata
-        target_cfg = rustc_cfg(rust, target)
+        facts = facts
+        target_cfg = rustc_cfg(rust, target, rustflags)
         host_cfg = rustc_cfg(rust, HOST)
     }
+}
+
+# The python library's pinned Python, which reads the manifests.
+fn pinned_python() -> PythonToolchain {
+    let made = (Toolchain::Python python_3_14)().made()
+    let python: Toolchain = made.provides
+    = Toolchain::Python.payload(python)
 }
 
 # The skeleton of the workspace `src`: its manifests, its lock, and
@@ -264,8 +304,29 @@ fn cargo_metadata(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, tar
     = file(at)
 }
 
-# The units of the build of the member `package`, or of its tests if `mode`
-# is `test`, for `target`, as `cargo build --unit-graph` plans them.
+# What `reader`, `manifests.py`, makes of the manifests of the workspace
+# whose skeleton is `skeleton`, and of `metadata`, what `cargo metadata`
+# says of it: a JSON list of `PackageFacts`.
+#[hermetic]
+fn manifest_facts(python: PythonToolchain, skeleton: Skeleton, metadata: File, reader: File) -> File {
+    let at = "{working_dir().path}/facts.json"
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = python.runtime},
+        {at = OPT_PYTHON; place = python.root},
+        ...(for each in skeleton.manifests { = {at = "{SRC}/{each.at}"; place = each.place} }),
+        {at = "/work/metadata.json"; place = metadata},
+        {at = "/work/manifests.py"; place = reader},
+    ]
+    let box = fs.compose(placed).sandbox(cwd = "/work")
+    let python_at = "{OPT_PYTHON}/{python.python.path.strip_prefix(python.root.path).strip_prefix("/")}"
+    let ran = box.exec(python_at, "-I", "/work/manifests.py", "/work/metadata.json", "/work/facts.json")
+    = box.file("/work/facts.json")
+}
+
+# The units of the member `package`'s plan for `target`, as `cargo
+# --unit-graph` makes it: of its build if `mode` is `build`, of its tests if
+# `test`, of every target `cargo clippy --all-targets` checks if `clippy`,
+# and of its documentation's tests if `doc`.
 #[hermetic]
 fn unit_graph(
     rust: RustToolchain,
@@ -277,7 +338,15 @@ fn unit_graph(
     features: List<String>,
 ) -> File {
     let box = planned_in(rust, skeleton, vendor, target)
-    let how = if mode == "test" { ["test", "--no-run"] } else { ["build"] }
+    let how = if mode == "test" {
+        ["test", "--no-run"]
+    } else if mode == "clippy" {
+        ["test", "--no-run", "--all-targets"]
+    } else if mode == "doc" {
+        ["test", "--doc"]
+    } else {
+        ["build"]
+    }
     let chosen: List<String> = if len(features) > 0 { ["--features", features.join(",")] } else { [] }
     let ran = box.exec(
         "{OPT_RUST}/bin/cargo",
@@ -451,6 +520,7 @@ def run_test(
     test: RustTest,
     given: List<{at: String, place: Dir | File}> = [],
     env: List<Entry<String>> = [],
+    args: List<String> = [],
 ) -> {} {
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = test.rust.runtime},
@@ -458,7 +528,111 @@ def run_test(
         ...(for each in given { = {at = each.at; place = each.place} }),
     ]
     let box = fs.compose(placed).sandbox(cwd = "/work")
-    let ran = box.exec("/work/test", env = environment([{key = "PATH"; value = "/usr/bin:/bin"}, ...env]))
+    let ran = box.exec("/work/test", ...args, env = environment([{key = "PATH"; value = "/usr/bin:/bin"}, ...env]))
+}
+
+def doctests(
+    ws: RustWorkspace,
+    package: String,
+    features: List<String> = [],
+    given: List<{at: String, place: Dir | File}> = [],
+    env: List<Entry<String>> = [],
+) -> List<{}> {
+    if not facts_of(ws, member_id(ws, package)).doctest {
+        return []
+    }
+    let graph = planned(ws, package, "doc", features)
+    let roots = for i in 0..len(graph.units) if graph.units[i].mode == "doctest" { = i }
+    let made = built(ws, graph, needs(graph, roots))
+    = for i in roots {
+        = doctested(ws.rust, doctest_of(ws, graph, made, unit_at(ws, graph, made, i)), given, env)
+    }
+}
+
+def clippy(
+    ws: RustWorkspace,
+    package: String,
+    features: List<String> = [],
+    flags: List<String> = [],
+) -> List<{}> {
+    # Its library, programs and build script, as they are built, and each
+    # target as its tests and checks build it.
+    = [
+        ...checked(ws, planned(ws, package, "build", features), package, flags),
+        ...checked(ws, planned(ws, package, "clippy", features), package, flags),
+    ]
+}
+
+# Clippy's checks of the crates of the member `package` that `graph` has,
+# but its build script's runs, with `flags`. Clippy lints only the packages
+# Cargo was asked for, so the other members `graph` has are left out.
+fn checked(ws: RustWorkspace, graph: UnitGraph, package: String, flags: List<String>) -> List<{}> {
+    let id = member_id(ws, package)
+    let chosen = for i in 0..len(graph.units) if graph.units[i].pkg_id == id and graph.units[i].mode != "run-custom-build" {
+        = i
+    }
+    let made = built(ws, graph, needs(graph, chosen))
+    = for i in chosen {
+        = clippy_checked(ws.rust, compile_of(ws, graph, made, unit_at(ws, graph, made, i)).spec, flags)
+    }
+}
+
+# The units the units `roots` of `graph` depend on, each once.
+fn needs(graph: UnitGraph, roots: List<Int>) -> List<Int> {
+    let mut found: List<Int> = []
+    for i in roots {
+        for dep in graph.units[i].dependencies {
+            found := [...found, dep.index]
+        }
+    }
+    = found.unique()
+}
+
+# The package ID of the workspace member `package`.
+fn member_id(ws: RustWorkspace, package: String) -> String {
+    for each in ws.metadata.packages {
+        if each.name == package and ws.metadata.workspace_members.contains(each.id) {
+            return each.id
+        }
+    }
+    panic("the workspace has no member `{package}`")
+}
+
+# How rustdoc tests the documentation of the library that the doctest unit
+# `at` of `graph` names, those it depends on built as `made` has them, as
+# Cargo has it test them: given what its compile would be, but no profile,
+# no native libraries and no link arguments of its own.
+fn doctest_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) -> CompileSpec {
+    let unit = graph.units[at.index]
+    let target = unit.target
+    let facts = facts_of(ws, unit.pkg_id)
+    let compiled = compile_of(ws, graph, made, at).spec
+    let none: List<String> = []
+    let args = [
+        "--edition={target.edition}",
+        ...(for each in target.crate_types { = "--crate-type={each}" }),
+        "--crate-name={target.name.split("-").join("_")}",
+        "--test",
+        target.src_path.strip_prefix("{SRC}/"),
+        "--test-run-directory={path.dirname(at.package.manifest_path)}",
+        ...facts.lints,
+        "-Cembed-bitcode=no",
+        ...(for each in unit.features { = "--cfg=feature=\"{each}\"" }),
+        ...facts.check_cfg,
+        "-Clinker={OPT_CC}/{ws.rust.cc.path.strip_prefix(ws.rust.cc_root.path).strip_prefix("/")}",
+        ...(if unit.platform == "" { none } else { ["--target={ws.target}"] }),
+    ]
+    = {
+        args = args
+        env = compiled.env
+        cwd = compiled.cwd
+        placed = compiled.placed
+        externs = compiled.externs
+        libraries = compiled.libraries
+        out = compiled.out
+        runs = compiled.runs
+        link = ""
+    }
 }
 
 # The units of the member `package`'s build, or its tests' if `mode` is
@@ -521,6 +695,16 @@ fn built(ws: RustWorkspace, graph: UnitGraph, roots: List<Int>) ->> List<Built> 
 # What the unit number `i` of `graph` comes to, those it depends on built
 # as `made` has them.
 fn unit_built(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, i: Int) -> Built {
+    let at = unit_at(ws, graph, made, i)
+    if graph.units[i].mode == "run-custom-build" {
+        return script_ran(ws, graph, made, at)
+    }
+    = compiled(ws, graph, made, at)
+}
+
+# The unit number `i` of `graph` as it is built, those it depends on built
+# as `made` has them.
+fn unit_at(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, i: Int) -> UnitAt {
     let unit = graph.units[i]
     let package = package_of(ws, unit.pkg_id)
     let settings = settings_of(ws, package.name)
@@ -538,28 +722,46 @@ fn unit_built(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, i: Int) ->
             }
         }
     }
-    let at: UnitAt = {
+    = {
         index = i
         package = package
         settings = settings
         placed = placed
         given = given
     }
-    if unit.mode == "run-custom-build" {
-        return script_ran(ws, graph, made, at)
-    }
-    = compiled(ws, graph, made, at)
 }
 
 # The crate or build script that the unit `at` of `graph` compiles, those
 # it depends on built as `made` has them.
 fn compiled(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) -> Built {
+    let planned = compile_of(ws, graph, made, at)
+    = {
+        kind = planned.kind
+        dir = compile(ws.rust, planned.spec)
+        files = planned.files
+        libraries = planned.libraries
+        runs = planned.runs
+        given = at.given
+    }
+}
+
+# How the unit `at` of `graph` is compiled, those it depends on built as
+# `made` has them: what it is, the artifacts it makes, the units of the
+# libraries and build-script runs it needs, and what rustc is given.
+fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) -> {
+    kind: String,
+    files: List<String>,
+    libraries: List<Int>,
+    runs: List<Int>,
+    spec: CompileSpec,
+} {
     let unit = graph.units[at.index]
     let target = unit.target
     let crate = target.name.split("-").join("_")
     let script = target.kind.contains("custom-build")
     let host = unit.platform == ""
     let member = ws.metadata.workspace_members.contains(unit.pkg_id)
+    let facts = facts_of(ws, unit.pkg_id)
     let root = path.dirname(at.package.manifest_path)
     # What it is given of the units it depends on: the libraries it names,
     # those they need, and the build-script runs, its own and theirs.
@@ -597,8 +799,16 @@ fn compiled(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) 
         "lib"
     }
     let files = artifacts(kind, crate, target.crate_types)
+    # A test target with no harness is a program of its own, compiled for
+    # tests, as Cargo compiles it.
+    let library = (for each in ["bin", "test", "bench", "example", "custom-build"] if target.kind.contains(each) {
+        = each
+    }).len() == 0
+    let harnessed = (for each in facts.plain if target.name == each.name and (target.kind.contains(each.kind) or (each.kind == "lib" and library)) {
+        = each
+    }).len() == 0
     let types = if kind == "test" {
-        ["--test"]
+        if harnessed { ["--test"] } else { ["--cfg=test"] }
     } else {
         for each in target.crate_types { = "--crate-type={if each == "lib" { "rlib" } else { each }}" }
     }
@@ -612,8 +822,11 @@ fn compiled(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) 
         "--edition={target.edition}",
         source,
         ...types,
+        ...lto_args(lto_of(graph)[at.index]),
         ...profile_args(unit.profile),
+        ...facts.lints,
         ...features,
+        ...facts.check_cfg,
         "-Cmetadata={unit.pkg_id} {unit.mode} {target.name} {unit.platform} {unit.features.join(",")}",
         "-Clinker={OPT_CC}/{ws.rust.cc.path.strip_prefix(ws.rust.cc_root.path).strip_prefix("/")}",
         ...(if host { none } else { ["--target={ws.target}", ...ws.rustflags] }),
@@ -640,14 +853,19 @@ fn compiled(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) 
         runs = for each in runs { = made[each].dir }
         link = link
     }
-    = {
-        kind = kind
-        dir = compile(ws.rust, spec)
-        files = files
-        libraries = libraries
-        runs = runs
-        given = at.given
+    = {kind = kind; files = files; libraries = libraries; runs = runs; spec = spec}
+}
+
+# What Cargo takes from the manifest of the package `id` that its plans
+# omit: nothing for a package outside the workspace.
+fn facts_of(ws: RustWorkspace, id: String) -> PackageFacts {
+    for each in ws.facts {
+        if each.id == id {
+            return each
+        }
     }
+    let none: PackageFacts = {id = id; lints = []; check_cfg = []; plain = []; doctest = false}
+    = none
 }
 
 # The artifacts rustc makes of the crate `crate` of the kind `kind` and the
@@ -666,6 +884,137 @@ fn artifacts(kind: String, crate: String, types: List<String>) -> List<String> {
         = if each == "staticlib" { "lib{crate}.a" } else { "lib{crate}.so" }
     }
     = [...rust, ...others]
+}
+
+# What rustc is told of a unit's link-time optimisation, `lto`, as
+# `lto_of` gives it, as Cargo tells it.
+fn lto_args(lto: String) -> List<String> {
+    if lto == "run" {
+        return ["-Clto"]
+    }
+    if lto.starts_with("run=") {
+        return ["-Clto={lto.strip_prefix("run=")}"]
+    }
+    if lto == "off" {
+        return ["-Clto=off"]
+    }
+    if lto == "bitcode" {
+        return ["-Clinker-plugin-lto"]
+    }
+    if lto == "object" {
+        return ["-Cembed-bitcode=no"]
+    }
+    # `both`, object code and bitcode, is rustc's own default.
+    let none: List<String> = []
+    = none
+}
+
+# The link-time optimisation each unit of `graph` takes, by its number, as
+# Cargo's `lto.rs` works it out from the roots down: `run`, or `run=` and
+# its kind, for a unit that is linked and optimised whole; `off`; `bitcode`
+# for a library only such a unit links; `object` for one only an
+# unoptimised link, a build script or a proc macro needs; `both` for one
+# both kinds need; and `""` for a unit no root reaches.
+fn lto_of(graph: UnitGraph) ->> List<String> {
+    let count = len(graph.units)
+    let mut found = for i in 0..count { = "" }
+    let mut pending: List<{unit: Int, parent: String}> = for root in graph.roots {
+        = {unit = root; parent = root_lto(graph.units[root])}
+    }
+    for len(pending) > 0 {
+        let next = pending[0]
+        pending := for k in 1..len(pending) { = pending[k] }
+        let lto = unit_lto(graph.units[next.unit], next.parent)
+        let had = found[next.unit]
+        let merged = merged_lto(lto, had)
+        if merged == had {
+            continue
+        }
+        found[next.unit] := merged
+        for dep in graph.units[next.unit].dependencies {
+            pending := [...pending, {unit = dep.index; parent = merged}]
+        }
+    }
+    = found
+}
+
+# The crate types Cargo works out a unit's link-time optimisation by: a
+# test's are a program's.
+fn lto_types(unit: Unit) -> List<String> {
+    if unit.mode == "test" or unit.mode == "bench" or unit.mode == "doctest" {
+        return ["bin"]
+    }
+    = unit.target.crate_types
+}
+
+# Whether the unit `unit` is built for the host alone: a build script or a
+# proc macro.
+fn for_host(unit: Unit) -> Bool {
+    = unit.target.kind.contains("custom-build") or unit.target.crate_types.contains("proc-macro")
+}
+
+# Whether one of the crate types `types` needs object code.
+fn needs_object(types: List<String>) -> Bool {
+    = (for each in types if ["bin", "staticlib", "cdylib", "dylib"].contains(each) { = each }).len() > 0
+}
+
+# What a unit of the crate types `types`, which need object code, takes
+# under a parent that optimises at link time.
+fn lto_needing_object(types: List<String>) -> String {
+    = if (for each in types if each != "dylib" { = each }).len() == 0 { "object" } else { "both" }
+}
+
+# What the root `unit` asks of itself, before its own is worked out.
+fn root_lto(unit: Unit) -> String {
+    let lto = unit.profile.lto
+    if lto == "false" {
+        return "object"
+    }
+    if lto == "off" {
+        return "off"
+    }
+    let types = unit.target.crate_types
+    = if for_host(unit) { "object" } else if needs_object(types) { lto_needing_object(types) } else { "bitcode" }
+}
+
+# The link-time optimisation of `unit` under a parent whose is `parent`.
+fn unit_lto(unit: Unit, parent: String) -> String {
+    let types = lto_types(unit)
+    let linked = (for each in types if not ["bin", "staticlib", "cdylib"].contains(each) { = each }).len() == 0
+    if for_host(unit) {
+        return "object"
+    }
+    if linked {
+        let lto = unit.profile.lto
+        return if lto == "false" { "object" } else if lto == "true" { "run" } else if lto == "off" { "off" } else { "run={lto}" }
+    }
+    let needs = needs_object(types)
+    let running = parent == "run" or parent.starts_with("run=")
+    if running and not needs {
+        return "bitcode"
+    }
+    if (running or parent == "bitcode") and needs {
+        return lto_needing_object(types)
+    }
+    = parent
+}
+
+# What a unit takes when it is reached twice, once needing `lto` and once
+# `had`: enough for both.
+fn merged_lto(lto: String, had: String) -> String {
+    if had == "" or lto == had {
+        return lto
+    }
+    if lto == "run" or lto.starts_with("run=") {
+        return lto
+    }
+    if had == "run" or had.starts_with("run=") {
+        return had
+    }
+    if lto == "off" or had == "off" {
+        return "off"
+    }
+    = "both"
 }
 
 # What rustc is told of the profile `profile`, as Cargo tells it.
@@ -689,11 +1038,6 @@ fn profile_args(profile: UnitProfile) -> List<String> {
     ]
     if profile.panic == "abort" {
         args := [...args, "-Cpanic=abort"]
-    }
-    if profile.lto == "true" or profile.lto == "fat" {
-        args := [...args, "-Clto"]
-    } else if profile.lto == "thin" or profile.lto == "off" {
-        args := [...args, "-Clto={profile.lto}"]
     }
     if profile.codegen_units > 0 {
         args := [...args, "-Ccodegen-units={profile.codegen_units}"]
@@ -879,6 +1223,60 @@ fn upper(text: String): String {
 # The crate `spec` says, compiled by rustc: the directory of what it made.
 #[hermetic]
 fn compile(rust: RustToolchain, spec: CompileSpec) -> Dir {
+    let given = given_of(rust, spec, true)
+    let box = fs.compose(given.placed).sandbox(cwd = spec.cwd)
+    let ran = box.exec("{OPT_RUST}/bin/rustc", ...given.args, "--out-dir=/work/build", env = environment(given.env))
+    = box.dir("/work/build")
+}
+
+# The crate `spec` says, checked by Clippy, with `flags` after its own:
+# fails if a lint it denies fires.
+#[hermetic]
+fn clippy_checked(rust: RustToolchain, spec: CompileSpec, flags: List<String>) -> {} {
+    let given = given_of(rust, spec, true)
+    let driver = "{OPT_RUST}/bin/clippy-driver"
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        ...given.placed,
+        {at = driver; place = rust.clippy.file("bin/clippy-driver")},
+    ]
+    let box = fs.compose(placed).sandbox(cwd = spec.cwd)
+    let ran = box.exec(driver, ...given.args, ...flags, "--emit=metadata", "--out-dir=/work/build", env = environment(given.env))
+    = {}
+}
+
+# The tests of the documentation of the library `spec` says, compiled and
+# run by rustdoc, with `given` placed at their paths and `env` set: fails
+# if one does.
+#[hermetic]
+fn doctested(
+    rust: RustToolchain,
+    spec: CompileSpec,
+    given: List<{at: String, place: Dir | File}>,
+    env: List<Entry<String>>,
+) -> {} {
+    let own = given_of(rust, spec, false)
+    # What the crate is compiled with may already hold what its tests are
+    # given, libpeios say: each path is placed once.
+    let had = for each in own.placed { = each.at }
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        ...own.placed,
+        ...(for each in given if not had.contains(each.at) { = {at = each.at; place = each.place} }),
+    ]
+    let box = fs.compose(placed).sandbox(cwd = spec.cwd)
+    let ran = box.exec("{OPT_RUST}/bin/rustdoc", ...own.args, env = environment([...own.env, ...env]))
+    = {}
+}
+
+# What the compile `spec` says is given in its step: its arguments, with
+# what it links and searches, and what its build script said; its
+# environment; and what its sandbox holds. Without `linking`, rustdoc's
+# tests are given no native libraries or link arguments of their own, as
+# Cargo gives them none.
+fn given_of(rust: RustToolchain, spec: CompileSpec, linking: Bool) -> {
+    args: List<String>,
+    env: List<Entry<String>>,
+    placed: List<{at: String, place: Dir | File | FileSet}>,
+} {
     let mut args = spec.args
     let mut env = spec.env
     for each in spec.externs {
@@ -892,9 +1290,10 @@ fn compile(rust: RustToolchain, spec: CompileSpec) -> Dir {
     }
     for run in spec.out {
         let own = said(run)
-        args := [...args, ...own.libs, ...own.cfgs]
+        let none: List<String> = []
+        args := [...args, ...(if linking { own.libs } else { none }), ...own.cfgs, ...own.checks]
         for each in own.link_args {
-            if each.kind == "" or each.kind == spec.link or "bins:{each.kind}" == spec.link or (each.kind == "bins" and spec.link.starts_with("bins:")) {
+            if linking and (each.kind == "" or each.kind == spec.link or "bins:{each.kind}" == spec.link or (each.kind == "bins" and spec.link.starts_with("bins:"))) {
                 args := [...args, "-Clink-arg={each.arg}"]
             }
         }
@@ -909,9 +1308,7 @@ fn compile(rust: RustToolchain, spec: CompileSpec) -> Dir {
         ...(for each in spec.runs { = {at = each.path; place = each} }),
         ...(for each in spec.out { = {at = OUT; place = each.dir("out")} }),
     ]
-    let box = fs.compose(placed).sandbox(cwd = spec.cwd)
-    let ran = box.exec("{OPT_RUST}/bin/rustc", ...args, "--out-dir=/work/build", env = environment(env))
-    = box.dir("/work/build")
+    = {args = args; env = env; placed = placed}
 }
 
 # The build script `spec` says, run: a directory of its `OUT_DIR`, `out`,
@@ -975,15 +1372,17 @@ fn directive(line: String): {key: String, value: String} {
 }
 
 # What the build script whose run is `run` said: the native libraries its
-# crate links and the configuration it is compiled with, the directories
-# it and every crate after it search for native libraries, its OUT_DIR
-# named by where its run is, the environment its crate is compiled with,
-# the link arguments of its package's targets, by which they apply to,
-# and the metadata its dependents' build scripts are given.
+# crate links and the configuration it is compiled with, the names of
+# configuration it declares, the directories it and every crate after it
+# search for native libraries, its OUT_DIR named by where its run is, the
+# environment its crate is compiled with, the link arguments of its
+# package's targets, by which they apply to, and the metadata its
+# dependents' build scripts are given.
 fn said(run: Dir) -> {
     libs: List<String>,
     search: List<String>,
     cfgs: List<String>,
+    checks: List<String>,
     env: List<Entry<String>>,
     link_args: List<{kind: String, arg: String}>,
     metadata: List<Entry<String>>,
@@ -991,6 +1390,7 @@ fn said(run: Dir) -> {
     let mut libs: List<String> = []
     let mut search: List<String> = []
     let mut cfgs: List<String> = []
+    let mut checks: List<String> = []
     let mut env: List<Entry<String>> = []
     let mut link_args: List<{kind: String, arg: String}> = []
     let mut metadata: List<Entry<String>> = []
@@ -1008,6 +1408,8 @@ fn said(run: Dir) -> {
             search := [...search, ...(for each in flags if each.starts_with("-L") { = each })]
         } else if found.key == "rustc-cfg" {
             cfgs := [...cfgs, "--cfg={value}"]
+        } else if found.key == "rustc-check-cfg" {
+            checks := [...checks, "--check-cfg={value}"]
         } else if found.key == "rustc-env" {
             let pair = value.split("=")
             env := [...env, {key = pair[0]; value = (for k in 1..len(pair) { = pair[k] }).join("=")}]
@@ -1029,7 +1431,7 @@ fn said(run: Dir) -> {
             metadata := [...metadata, {key = found.key; value = value}]
         }
     }
-    = {libs = libs; search = search; cfgs = cfgs; env = env; link_args = link_args; metadata = metadata}
+    = {libs = libs; search = search; cfgs = cfgs; checks = checks; env = env; link_args = link_args; metadata = metadata}
 }
 
 # The `-l` and `-L` flags of a `rustc-flags` directive's value, `value`,
