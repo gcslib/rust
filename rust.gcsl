@@ -378,7 +378,7 @@ def default_target_c(target: String) -> toolchain.CToolchain {
 # The directory of the C compiler's own headers, `stddef.h`'s, in the C
 # toolchain `c`, from its install's root: what `cc -print-file-name=include`
 # says.
-def builtin_headers(c: toolchain.CToolchain) -> String {
+def builtin_headers(c: toolchain.CToolchain) ->> String {
     for each in c.root.dir("lib/gcc").files() {
         if each.path.ends_with("/include/stddef.h") {
             return each.path.strip_prefix(c.root.path).strip_prefix("/").strip_suffix("/stddef.h")
