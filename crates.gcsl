@@ -336,7 +336,7 @@ fn environment(entries: List<Entry<String>>) -> {*: String} {
 # needs, its own among them; and what those crates' packages are given.
 type Built = {
     kind: String,
-    dir: Dir,
+    dir: Dir | Future<Dir>,
     files: List<String> = [],
     libraries: List<Int> = [],
     runs: List<Int> = [],
@@ -354,10 +354,10 @@ type CompileSpec = {
     env: List<Entry<String>>,
     cwd: String,
     placed: List<{at: String, place: Dir | File}>,
-    externs: List<{name: String, dir: Dir, file: String}>,
-    libraries: List<Dir>,
-    out: List<Dir>,
-    runs: List<Dir>,
+    externs: List<{name: String, dir: Dir | Future<Dir>, file: String}>,
+    libraries: List<Dir | Future<Dir>>,
+    out: List<Dir | Future<Dir>>,
+    runs: List<Dir | Future<Dir>>,
     link: String,
 }
 
@@ -367,12 +367,12 @@ type CompileSpec = {
 # library, by the library's name, and the configuration of the machine it
 # builds for.
 type RunSpec = {
-    script: Dir,
+    script: Dir | Future<Dir>,
     program: String,
     env: List<Entry<String>>,
     cwd: String,
     placed: List<{at: String, place: Dir | File}>,
-    links: List<{links: String, dir: Dir}>,
+    links: List<{links: String, dir: Dir | Future<Dir>}>,
     cfg: File,
 }
 
@@ -563,10 +563,10 @@ fn compiled(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) 
     let root = path.dirname(at.package.manifest_path)
     # What it is given of the units it depends on: the libraries it names,
     # those they need, and the build-script runs, its own and theirs.
-    let mut externs: List<{name: String, dir: Dir, file: String}> = []
+    let mut externs: List<{name: String, dir: Dir | Future<Dir>, file: String}> = []
     let mut libraries: List<Int> = []
     let mut runs: List<Int> = []
-    let mut out: List<Dir> = []
+    let mut out: List<Dir | Future<Dir>> = []
     for dep in unit.dependencies {
         let given = made[dep.index]
         if given.kind == "run" {
@@ -750,7 +750,7 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     let target = if host { HOST } else { ws.target }
     let root = path.dirname(at.package.manifest_path)
     let mut scripts: List<Built> = []
-    let mut links: List<{links: String, dir: Dir}> = []
+    let mut links: List<{links: String, dir: Dir | Future<Dir>}> = []
     for dep in unit.dependencies {
         let given = made[dep.index]
         if given.kind == "script" {
