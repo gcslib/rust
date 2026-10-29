@@ -57,7 +57,8 @@ with the same features, share them.
   files placed for them and everything that depends on them (`given`), a
   native library a build script links, say.
 - `bin(ws, package)`, `library(ws, package)`, `static_library(ws,
-  package)`: a member's program, its shared library and its static archive.
+  package)`: a member's program, its shared library and its static archive,
+  with `features` if given.
 - `tests(ws, package)`: a member's test programs, with `features` if
   given; `run_test(test)` runs one, with `args` if given.
 - `doctests(ws, package)`: a member's documentation tests, run by rustdoc

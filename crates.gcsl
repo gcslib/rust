@@ -26,7 +26,7 @@
 # - `bin(ws, package, name)`: the program `name` of the member `package`,
 #   by default its own name; `library(ws, package)`: its shared library,
 #   its `cdylib`; `static_library(ws, package)`: its static archive, its
-#   `staticlib`.
+#   `staticlib`. Each takes `features`, as `cargo build --features` does.
 # - `tests(ws, package)`: the test programs of the member `package`, its
 #   unit tests and each integration test, with `features` too if given, as
 #   `cargo test --features` builds them: a `RustTest` each, by its name;
@@ -463,8 +463,8 @@ type UnitAt = {
     given: List<{at: String, place: Dir | File}>,
 }
 
-def bin(ws: RustWorkspace, package: String, name: String = package) -> File {
-    let graph = planned(ws, package, "build")
+def bin(ws: RustWorkspace, package: String, name: String = package, features: List<String> = []) -> File {
+    let graph = planned(ws, package, "build", features)
     let mut root = -1
     for i in 0..len(graph.units) {
         let unit = graph.units[i]
@@ -479,19 +479,19 @@ def bin(ws: RustWorkspace, package: String, name: String = package) -> File {
     = made[root].dir.file(made[root].files[0])
 }
 
-def library(ws: RustWorkspace, package: String) -> File {
-    = linked(ws, package, "cdylib", ".so")
+def library(ws: RustWorkspace, package: String, features: List<String> = []) -> File {
+    = linked(ws, package, "cdylib", ".so", features)
 }
 
-def static_library(ws: RustWorkspace, package: String) -> File {
-    = linked(ws, package, "staticlib", ".a")
+def static_library(ws: RustWorkspace, package: String, features: List<String> = []) -> File {
+    = linked(ws, package, "staticlib", ".a", features)
 }
 
 # The library of the crate type `kind` of the member `package`, whose file
-# ends with `suffix`: one compile makes every crate type its manifest names,
-# as Cargo does.
-fn linked(ws: RustWorkspace, package: String, kind: String, suffix: String) -> File {
-    let graph = planned(ws, package, "build")
+# ends with `suffix`, with `features`: one compile makes every crate type its
+# manifest names, as Cargo does.
+fn linked(ws: RustWorkspace, package: String, kind: String, suffix: String, features: List<String>) -> File {
+    let graph = planned(ws, package, "build", features)
     let mut root = -1
     for i in 0..len(graph.units) {
         if graph.units[i].mode == "build" and graph.units[i].target.crate_types.contains(kind) {
