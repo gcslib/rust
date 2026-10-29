@@ -57,7 +57,8 @@ with the same features, share them.
   files placed for them and everything that depends on them (`given`), a
   native library a build script links, say.
 - `bin(ws, package)`, `library(ws, package)`, `static_library(ws,
-  package)`: a member's program, its shared library and its static archive.
+  package)`: a member's program, its shared library and its static archive,
+  with `features` if given.
 - `tests(ws, package)`: a member's test programs, with `features` if
   given; `run_test(test)` runs one, with `args` if given.
 - `doctests(ws, package)`: a member's documentation tests, run by rustdoc
@@ -65,6 +66,9 @@ with the same features, share them.
 - `clippy(ws, package)`: Clippy's checks of a member, as `cargo clippy
   --all-targets` makes them, each crate a step, with `flags` after its
   lints, `-Dwarnings` say.
+- `docs(ws, package)`: the documentation of a member's library, made by
+  rustdoc as `cargo doc --no-deps` makes it, a step, with `flags` after
+  its lints, `-Dwarnings` say.
 - `cargo_build(src, vendor, bins)`: the binaries `bins` of a Cargo
   workspace, built whole by Cargo in one step, by default static musl
   programs. Give `target = "x86_64-unknown-linux-gnu"` for programs linked
