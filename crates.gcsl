@@ -26,7 +26,9 @@
 # - `bin(ws, package, name)`: the program `name` of the member `package`,
 #   by default its own name; `library(ws, package)`: its shared library,
 #   its `cdylib`; `static_library(ws, package)`: its static archive, its
-#   `staticlib`. Each takes `features`, as `cargo build --features` does.
+#   `staticlib`; `example(ws, package, name)`: its example `name`, a
+#   program, as `cargo build --example` builds it. Each takes `features`,
+#   as `cargo build --features` does.
 # - `tests(ws, package)`: the test programs of the member `package`, its
 #   unit tests and each integration test, with `features` too if given, as
 #   `cargo test --features` builds them: a `RustTest` each, by its name;
@@ -350,6 +352,8 @@ fn unit_graph(
         ["test", "--no-run", "--all-targets"]
     } else if mode == "doc" {
         ["test", "--doc"]
+    } else if mode == "examples" {
+        ["build", "--examples"]
     } else {
         ["build"]
     }
@@ -476,6 +480,22 @@ def bin(ws: RustWorkspace, package: String, name: String = package, features: Li
     }
     if root < 0 {
         panic("the member `{package}` has no program `{name}`")
+    }
+    let made = built(ws, graph, [root])
+    = made[root].dir.file(made[root].files[0])
+}
+
+def example(ws: RustWorkspace, package: String, name: String, features: List<String> = []) -> File {
+    let graph = planned(ws, package, "examples", features)
+    let mut root = -1
+    for i in 0..len(graph.units) {
+        let unit = graph.units[i]
+        if unit.mode == "build" and unit.target.kind.contains("example") and unit.target.name == name {
+            root := i
+        }
+    }
+    if root < 0 {
+        panic("the member `{package}` has no example `{name}` that is a program")
     }
     let made = built(ws, graph, [root])
     = made[root].dir.file(made[root].files[0])
@@ -897,7 +917,9 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         ...(if member { none } else { ["--cap-lints=allow"] }),
         ...(if kind == "proc-macro" { ["--extern=proc_macro"] } else { none }),
     ]
-    let link = if kind == "bin" {
+    let link = if kind == "bin" and target.kind.contains("example") {
+        "examples"
+    } else if kind == "bin" {
         "bins:{target.name}"
     } else if kind == "test" {
         "tests"
@@ -1138,7 +1160,7 @@ fn crate_env(ws: RustWorkspace, package: MetaPackage, unit: Unit, crate: String)
         {key = "CARGO_PKG_README"; value = package.readme},
         {key = "CARGO_CRATE_NAME"; value = crate},
     ]
-    if unit.target.kind.contains("bin") {
+    if unit.target.kind.contains("bin") or (unit.target.kind.contains("example") and unit.target.crate_types.contains("bin")) {
         env := [...env, {key = "CARGO_BIN_NAME"; value = unit.target.name}]
     }
     if ws.metadata.workspace_members.contains(unit.pkg_id) {
@@ -1513,6 +1535,8 @@ fn said(run: Dir) -> {
         } else if found.key == "rustc-link-arg-bin" {
             let pair = value.split("=")
             link_args := [...link_args, {kind = pair[0]; arg = (for k in 1..len(pair) { = pair[k] }).join("=")}]
+        } else if found.key == "rustc-link-arg-examples" {
+            link_args := [...link_args, {kind = "examples"; arg = value}]
         } else if found.key == "rustc-link-arg-tests" {
             link_args := [...link_args, {kind = "tests"; arg = value}]
         } else if found.key == "rustc-cdylib-link-arg" or found.key == "rustc-link-arg-cdylib" {
