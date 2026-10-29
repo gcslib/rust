@@ -46,8 +46,10 @@ with the same features, share them.
   standard libraries for `x86_64-unknown-linux-gnu` and
   `x86_64-unknown-linux-musl`, and Clippy.
 - `vendored(lock)`: every crate `lock` pins, from crates.io by its checksum
-  or from a git repository by its commit, laid out as `cargo vendor` does. A git crate from a repository the workspace also imports a library from
-  must be at the commit the host pinned that library at
+  or from a git repository by its commit, laid out as `cargo vendor` does,
+  a git crate's manifest written for it to build on its own when it takes
+  values from its workspace's or names a sibling crate's path. A git crate
+  from a repository the workspace also imports a library from must be at the commit the host pinned that library at
   (`libraries.pinned_libraries`), or the build fails saying which to update:
   the crates and the settings the library gives them are of one commit.
 - `workspace(src, vendor)`: a Cargo workspace, planned by Cargo for
@@ -61,12 +63,15 @@ with the same features, share them.
   library, its static archive and one of its examples that is a program,
   with `features` if given.
 - `tests(ws, package)`: a member's test programs, with `features` if
-  given; `run_test(test)` runs one, with `args` if given.
+  given, each integration test with the package's programs that
+  `CARGO_BIN_EXE_<name>` names; `run_test(test)` runs one, with those
+  programs where it was told, and `args` if given.
 - `doctests(ws, package)`: a member's documentation tests, run by rustdoc
   as `cargo test --doc` runs them, each crate's a step.
 - `clippy(ws, package)`: Clippy's checks of a member, as `cargo clippy
   --all-targets` makes them, each crate a step, with `flags` after its
-  lints, `-Dwarnings` say.
+  lints, `-Dwarnings` say, and the workspace's `clippy.toml` or
+  `.clippy.toml` if it has one.
 - `docs(ws, package)`: the documentation of a member's library, made by
   rustdoc as `cargo doc --no-deps` makes it, a step, with `flags` after
   its lints, `-Dwarnings` say.
