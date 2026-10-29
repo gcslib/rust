@@ -55,9 +55,13 @@ with the same features, share them.
 - `workspace(src, vendor)`: a Cargo workspace, planned by Cargo for
   `target`, by default `x86_64-unknown-linux-gnu`. Give `crates` the
   settings of packages that need more than their manifests say: files
-  beside them that they read (`data`), environment variables (`env`), and
+  under the workspace that they read (`data`), files placed relative to a
+  package's own directory (`beside`), environment variables (`env`), and
   files placed for them and everything that depends on them (`given`), a
-  native library a build script links, say.
+  native library a build script links, say. `beside` is for a git crate
+  that reads files of its repository outside its own directory, which
+  vendoring leaves behind: `{at = "../shared/words.txt"; place = ...}` for
+  a crate that `include_str!`s `../../shared/words.txt` from `src/lib.rs`.
 - `bin(ws, package)`, `library(ws, package)`, `static_library(ws,
   package)`, `example(ws, package, name)`: a member's program, its shared
   library, its static archive and one of its examples that is a program,

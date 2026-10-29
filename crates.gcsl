@@ -18,7 +18,12 @@
 # - `CrateSettings`: what a package needs that its manifest does not say:
 #   `data`, files and directories its compiles and its build script read
 #   besides its own directory, each placed at `at` under the workspace, as
-#   `registry.d` beside the package that `include_str!`s it; `env`, what its
+#   `registry.d` beside the package that `include_str!`s it; `beside`,
+#   files and directories placed at `at` relative to the package's own
+#   directory, `..` climbing out of it, as a `#[path]` or an `include_str!`
+#   that reaches outside the package names them: what a crate from a git
+#   repository reads of the repository besides its own directory, which
+#   vendoring leaves behind, wherever its directory is placed; `env`, what its
 #   build script and its compiles are given besides; and `given`, files and
 #   directories placed at the absolute paths `at` for its build script, its
 #   compiles and those of every crate that depends on it, a library a build
@@ -114,6 +119,7 @@ let RESERVED = ["rerun-if-changed", "rerun-if-env-changed", "warning", "error", 
 type CrateSettings = {
     package: String,
     data: List<{at: String, place: Dir | File}> = [],
+    beside: List<{at: String, place: Dir | File}> = [],
     env: List<Entry<String>> = [],
     given: List<{at: String, place: Dir | File}> = [],
 }
@@ -825,11 +831,13 @@ fn unit_at(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, i: Int) -> Un
     let package = package_of(ws, unit.pkg_id)
     let settings = settings_of(ws, package.name)
     let root = path.dirname(package.manifest_path)
-    # Its data, and its own directory unless its data holds it.
+    # Its data, its own directory unless its data holds it, and what is
+    # placed beside it.
     let data = for each in settings.data { = {at = "{SRC}/{each.at}"; place = each.place} }
     let within = (for each in data if root == each.at or root.starts_with("{each.at}/") { = each.at }).len() > 0
     let own: List<{at: String, place: Dir | File}> = if within { [] } else { crate_entries(ws, root) }
-    let placed: List<{at: String, place: Dir | File}> = [...own, ...data]
+    let beside = for each in settings.beside { = {at = path.join(root, each.at); place = each.place} }
+    let placed: List<{at: String, place: Dir | File}> = [...own, ...data, ...beside]
     let mut given = settings.given
     for dep in unit.dependencies {
         for each in made[dep.index].given {
