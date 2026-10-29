@@ -55,6 +55,10 @@
 #   program needs, and the registered C toolchain for any other. `beside` are directories
 #   the source takes by their paths, each placed at its path, `at`, beside
 #   the source as `../AT` reaches it: another repository's crate, say.
+#   `crates` are settings of particular packages, a `CrateSettings` each,
+#   of which `cargo_build` takes a git crate's `beside`: what it reads of
+#   its repository outside its own directory, placed relative to where it
+#   is vendored, as `workspace` places it.
 #   `libs` are libraries it builds to give besides the binaries,
 #   `libpeios.a` say; `env`, what Cargo gives every build script besides,
 #   each by its name; and `libclang`, a directory holding the `libclang.so`
@@ -78,6 +82,7 @@
 # `workspace`.
 import fs
 import libraries
+import path
 import unpack from archive
 import toolchain
 import Toolchain from toolchain
@@ -419,6 +424,26 @@ fn vendor(
     = fs.compose(flat)
 }
 
+# What `crates` place beside the git crates of `vendor` that they name,
+# each relative to where `cargo_build` vendors the crate. A package of
+# another kind, a crate of crates.io or the workspace's own, is placed
+# whole, so is given nothing.
+fn beside_vendored(vendor: Vendored, crates: List<CrateSettings>) -> List<{at: String, place: Dir | File}> {
+    let mut placed: List<{at: String, place: Dir | File}> = []
+    for settings in crates {
+        let roots = for each in vendor.git if each.name == settings.package { = "/work/vendor/{each.name}-{each.version}" }
+        if len(roots) == 0 and len(settings.beside) > 0 {
+            panic("`cargo_build` places `beside` only for a git crate of the lock, and `{settings.package}` is none")
+        }
+        for root in roots {
+            for each in settings.beside {
+                placed := [...placed, {at = path.join(root, each.at); place = each.place}]
+            }
+        }
+    }
+    = placed
+}
+
 # The flags a build for `target` takes unless given: static,
 # position-independent programs for a musl target, which need nothing of the
 # system they run on, and none for any other.
@@ -481,6 +506,7 @@ def cargo_build(
     packages: List<String> = [],
     rustflags: List<String> = default_rustflags(target),
     beside: List<{at: String, place: Dir}> = [],
+    crates: List<CrateSettings> = [],
     libs: List<String> = [],
     env: List<Entry<String>> = [],
     libclang: List<Dir> = [],
@@ -532,6 +558,7 @@ def cargo_build(
         {at = "/work/src"; place = src},
         ...(for each in beside { = {at = "/work/{each.at}"; place = each.place} }),
         {at = "/work/vendor"; place = vendor.crates},
+        ...beside_vendored(vendor, crates),
         {at = "/work/home/config.toml"; place = file(config)},
     ]
     let box = fs.compose(placed).sandbox(
