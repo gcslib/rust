@@ -41,6 +41,10 @@
 #   `cargo clippy --all-targets` checks it, each of its crates a step,
 #   `flags` given after the lints, `-Dwarnings` say. A check fails as its
 #   compile would, so a lint denied fails it.
+# - `docs(ws, package)`: the documentation of the member `package`'s
+#   library, made by rustdoc as a step, as `cargo doc --no-deps` makes it,
+#   `flags` given after the lints, `-Dwarnings` say: the directory rustdoc
+#   wrote. It fails as rustdoc does, so a lint denied fails it.
 #
 # A member's crates are compiled with what Cargo takes from its manifest
 # that its plans omit, as `manifests.py` reads it with the python library's
@@ -563,6 +567,32 @@ def clippy(
     ]
 }
 
+def docs(
+    ws: RustWorkspace,
+    package: String,
+    features: List<String> = [],
+    flags: List<String> = [],
+) -> Dir {
+    # Its library as its build has it, the crates it depends on built as
+    # they are for that build.
+    let graph = planned(ws, package, "build", features)
+    let id = member_id(ws, package)
+    let found = for i in 0..len(graph.units) if graph.units[i].pkg_id == id and graph.units[i].mode == "build" and is_library(graph.units[i].target) {
+        = i
+    }
+    if len(found) == 0 {
+        panic("the member `{package}` has no library to document")
+    }
+    let made = built(ws, graph, needs(graph, found))
+    = documented(ws.rust, doc_of(ws, graph, made, unit_at(ws, graph, made, found[0])), flags)
+}
+
+# Whether `target` is a package's library, and not a program, a test, a
+# benchmark, an example or a build script.
+fn is_library(target: UnitTarget): Bool {
+    = (for each in ["bin", "test", "bench", "example", "custom-build"] if target.kind.contains(each) { = each }).len() == 0
+}
+
 # Clippy's checks of the crates of the member `package` that `graph` has,
 # but its build script's runs, with `flags`. Clippy lints only the packages
 # Cargo was asked for, so the other members `graph` has are left out.
@@ -620,6 +650,40 @@ fn doctest_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         ...(for each in unit.features { = "--cfg=feature=\"{each}\"" }),
         ...facts.check_cfg,
         "-Clinker={OPT_CC}/{ws.rust.cc.path.strip_prefix(ws.rust.cc_root.path).strip_prefix("/")}",
+        ...(if unit.platform == "" { none } else { ["--target={ws.target}"] }),
+    ]
+    = {
+        args = args
+        env = compiled.env
+        cwd = compiled.cwd
+        placed = compiled.placed
+        externs = compiled.externs
+        libraries = compiled.libraries
+        out = compiled.out
+        runs = compiled.runs
+        link = ""
+    }
+}
+
+# How rustdoc documents the library that the unit `at` of `graph` builds,
+# those it depends on built as `made` has them, as Cargo has it document
+# it: given what its compile would be, but no profile, no native libraries
+# and no link arguments of its own, and told the package's version.
+fn doc_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) -> CompileSpec {
+    let unit = graph.units[at.index]
+    let target = unit.target
+    let facts = facts_of(ws, unit.pkg_id)
+    let compiled = compile_of(ws, graph, made, at).spec
+    let none: List<String> = []
+    let args = [
+        "--edition={target.edition}",
+        ...(for each in target.crate_types { = "--crate-type={each}" }),
+        "--crate-name={target.name.split("-").join("_")}",
+        target.src_path.strip_prefix("{SRC}/"),
+        ...facts.lints,
+        ...(for each in unit.features { = "--cfg=feature=\"{each}\"" }),
+        ...facts.check_cfg,
+        "--crate-version={at.package.version}",
         ...(if unit.platform == "" { none } else { ["--target={ws.target}"] }),
     ]
     = {
@@ -801,9 +865,7 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     let files = artifacts(kind, crate, target.crate_types)
     # A test target with no harness is a program of its own, compiled for
     # tests, as Cargo compiles it.
-    let library = (for each in ["bin", "test", "bench", "example", "custom-build"] if target.kind.contains(each) {
-        = each
-    }).len() == 0
+    let library = is_library(target)
     let harnessed = (for each in facts.plain if target.name == each.name and (target.kind.contains(each.kind) or (each.kind == "lib" and library)) {
         = each
     }).len() == 0
@@ -1265,6 +1327,17 @@ fn doctested(
     let box = fs.compose(placed).sandbox(cwd = spec.cwd)
     let ran = box.exec("{OPT_RUST}/bin/rustdoc", ...own.args, env = environment([...own.env, ...env]))
     = {}
+}
+
+# The documentation of the library `spec` says, made by rustdoc, with
+# `flags` after its own: the directory it wrote. Fails if rustdoc does, or
+# a lint it denies fires.
+#[hermetic]
+fn documented(rust: RustToolchain, spec: CompileSpec, flags: List<String>) -> Dir {
+    let own = given_of(rust, spec, false)
+    let box = fs.compose(own.placed).sandbox(cwd = spec.cwd)
+    let ran = box.exec("{OPT_RUST}/bin/rustdoc", ...own.args, ...flags, "--out-dir=/work/doc", env = environment(own.env))
+    = box.dir("/work/doc")
 }
 
 # What the compile `spec` says is given in its step: its arguments, with

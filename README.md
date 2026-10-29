@@ -65,6 +65,9 @@ with the same features, share them.
 - `clippy(ws, package)`: Clippy's checks of a member, as `cargo clippy
   --all-targets` makes them, each crate a step, with `flags` after its
   lints, `-Dwarnings` say.
+- `docs(ws, package)`: the documentation of a member's library, made by
+  rustdoc as `cargo doc --no-deps` makes it, a step, with `flags` after
+  its lints, `-Dwarnings` say.
 - `cargo_build(src, vendor, bins)`: the binaries `bins` of a Cargo
   workspace, built whole by Cargo in one step, by default static musl
   programs. Give `target = "x86_64-unknown-linux-gnu"` for programs linked
