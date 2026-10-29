@@ -798,7 +798,7 @@ fn unit_at(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, i: Int) -> Un
     # Its data, and its own directory unless its data holds it.
     let data = for each in settings.data { = {at = "{SRC}/{each.at}"; place = each.place} }
     let within = (for each in data if root == each.at or root.starts_with("{each.at}/") { = each.at }).len() > 0
-    let own: List<{at: String, place: Dir | File}> = if within { [] } else { [{at = root; place = crate_dir(ws, root)}] }
+    let own: List<{at: String, place: Dir | File}> = if within { [] } else { crate_entries(ws, root) }
     let placed: List<{at: String, place: Dir | File}> = [...own, ...data]
     let mut given = settings.given
     for dep in unit.dependencies {
@@ -1275,37 +1275,28 @@ fn settings_of(ws: RustWorkspace, name: String) -> CrateSettings {
     = {package = name}
 }
 
-# The directory of the package whose root is at `root` in a step's sandbox:
-# the workspace's own, or a vendored crate's.
-fn crate_dir(ws: RustWorkspace, root: String) -> Dir {
+# The directory of the package whose root is at `root` in a step's sandbox,
+# the workspace's own or a vendored crate's, placed there. A package at the
+# workspace's root is given what the skeleton keeps of the root, each entry
+# at its own path, without the build's outputs and hidden directories,
+# which a step is not given: entries, not one directory made of them, so
+# that an edit makes no step copy the root again.
+fn crate_entries(ws: RustWorkspace, root: String) -> List<{at: String, place: Dir | File}> {
     if root == SRC {
-        return root_dir(ws)
+        let kept = [...(for each in ws.skeleton.manifests { = each.at }), ...ws.skeleton.paths]
+        let tops = (for each in kept { = each.split("/")[0] }).unique()
+        return for top in tops {
+            let place: Dir | File = if kept.contains(top) { ws.src.file(top) } else { ws.src.dir(top) }
+            = {at = "{SRC}/{top}"; place = place}
+        }
     }
     if root.starts_with("{SRC}/") {
-        return ws.src.dir(root.strip_prefix("{SRC}/"))
+        return [{at = root; place = ws.src.dir(root.strip_prefix("{SRC}/"))}]
     }
     if root.starts_with("{VENDOR}/") {
-        return ws.vendor.crates.dir(root.strip_prefix("{VENDOR}/"))
+        return [{at = root; place = ws.vendor.crates.dir(root.strip_prefix("{VENDOR}/"))}]
     }
     panic("a package outside the workspace and its vendored crates, at `{root}`")
-}
-
-# The directory of a package at the workspace's root: what the skeleton
-# keeps of the root, each entry at its top, without the build's outputs and
-# hidden directories, which a step is not given.
-fn root_dir(ws: RustWorkspace) ->> Dir {
-    let kept = [...(for each in ws.skeleton.manifests { = each.at }), ...ws.skeleton.paths]
-    let tops = (for each in kept { = each.split("/")[0] }).unique()
-    = composed(for top in tops {
-        let place: Dir | File = if kept.contains(top) { ws.src.file(top) } else { ws.src.dir(top) }
-        = {at = top; place = place}
-    })
-}
-
-# `entries`, each placed at its path, as one directory.
-#[hermetic]
-fn composed(entries: List<{at: String, place: Dir | File}>) -> Dir {
-    = fs.compose(for each in entries { = {at = each.at; place = each.place} })
 }
 
 # `text` with its ASCII letters in upper case.
