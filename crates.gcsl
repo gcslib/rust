@@ -31,18 +31,25 @@
 #   as `cargo build --features` does.
 # - `tests(ws, package)`: the test programs of the member `package`, its
 #   unit tests and each integration test, with `features` too if given, as
-#   `cargo test --features` builds them: a `RustTest` each, by its name;
+#   `cargo test --features` builds them: a `RustTest` each, by its name,
+#   with the package's programs an integration test runs, which
+#   `CARGO_BIN_EXE_<name>` names, as Cargo builds and names them;
 #   `run_test(test)` runs one, a step, in a sandbox of the toolchain's
-#   runtime with a writable `/tmp`, `given` placed at their paths, `env`
-#   set and `args` its arguments, and fails if it does.
+#   runtime with a writable `/tmp`, told of its package as Cargo tells a
+#   test it runs, `CARGO_MANIFEST_DIR` and `CARGO_PKG_VERSION` say, those
+#   programs where it was told,
+#   `given` placed at their paths, `env` set and `args` its arguments, and
+#   fails if it does.
 # - `doctests(ws, package)`: the tests of the member `package`'s
 #   documentation, each crate's run by rustdoc as a step, as `cargo test
 #   --doc` runs them, with `given` and `env` as `run_test` has them; none
 #   for a member with no library whose documentation is tested.
 # - `clippy(ws, package)`: Clippy's checks of the member `package`, as
 #   `cargo clippy --all-targets` checks it, each of its crates a step,
-#   `flags` given after the lints, `-Dwarnings` say. A check fails as its
-#   compile would, so a lint denied fails it.
+#   `flags` given after the lints, `-Dwarnings` say, and the workspace's
+#   `clippy.toml` or `.clippy.toml`, if it has one, as Clippy finds it
+#   above a crate's manifest. A check fails as its compile would, so a lint
+#   denied fails it.
 # - `docs(ws, package)`: the documentation of the member `package`'s
 #   library, made by rustdoc as a step, as `cargo doc --no-deps` makes it,
 #   `flags` given after the lints, `-Dwarnings` say: the directory rustdoc
@@ -77,6 +84,13 @@ let OPT_CC = "/opt/cc"
 let OPT_TARGET_CC = "/opt/target-cc"
 
 let OPT_LIBCLANG = "/opt/libclang"
+
+# Where an integration test has its package's programs, which
+# `CARGO_BIN_EXE_<name>` names, as Cargo has them in its target directory.
+let BIN_EXE = "/work/bin"
+
+# Where a Clippy check's sandbox has the workspace's Clippy configuration.
+let OPT_CLIPPY_CONF = "/opt/clippy"
 
 # Where the step that reads the manifests has Python.
 let OPT_PYTHON = "/opt/python"
@@ -179,6 +193,7 @@ type RustWorkspace = {
     facts: List<PackageFacts>,
     target_cfg: File,
     host_cfg: File,
+    clippy_config: List<File>,
 }
 
 def workspace(
@@ -211,6 +226,7 @@ def workspace(
         facts = facts
         target_cfg = rustc_cfg(rust, target, rustflags)
         host_cfg = rustc_cfg(rust, HOST)
+        clippy_config = for name in ["clippy.toml", ".clippy.toml"] if fs.exists("{src.path}/{name}") { = src.file(name) }
     }
 }
 
@@ -456,7 +472,13 @@ type RunSpec = {
 }
 
 # A test program of a member, by its name, with what runs it.
-type RustTest = {name: String, program: File, rust: RustToolchain}
+type RustTest = {
+    name: String,
+    program: File,
+    rust: RustToolchain,
+    programs: List<{at: String, place: File}> = [],
+    env: List<Entry<String>> = [],
+}
 
 # A unit being built: its number in its graph, its package and that
 # package's settings, what its sandbox holds of its package, and what the
@@ -537,6 +559,11 @@ def tests(ws: RustWorkspace, package: String, features: List<String> = []) -> Li
             name = graph.units[i].target.name
             program = made[i].dir.file(made[i].files[0])
             rust = ws.rust
+            programs = for dep in graph.units[i].dependencies if graph.units[dep.index].target.kind.contains("bin") {
+                let built = made[dep.index]
+                = {at = "{BIN_EXE}/{graph.units[dep.index].target.name}"; place = built.dir.file(built.files[0])}
+            }
+            env = run_env(ws, graph.units[i])
         }
     }
 }
@@ -551,10 +578,11 @@ def run_test(
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = test.rust.runtime},
         {at = "/work/test"; place = test.program},
+        ...(for each in test.programs { = {at = each.at; place = each.place} }),
         ...(for each in given { = {at = each.at; place = each.place} }),
     ]
     let box = fs.compose(placed).sandbox(cwd = "/work")
-    let ran = box.exec("/work/test", ...args, env = environment([{key = "PATH"; value = "/usr/bin:/bin"}, ...env]))
+    let ran = box.exec("/work/test", ...args, env = environment([{key = "PATH"; value = "/usr/bin:/bin"}, ...test.env, ...env]))
 }
 
 def doctests(
@@ -625,7 +653,7 @@ fn checked(ws: RustWorkspace, graph: UnitGraph, package: String, flags: List<Str
     }
     let made = built(ws, graph, needs(graph, chosen))
     = for i in chosen {
-        = clippy_checked(ws.rust, compile_of(ws, graph, made, unit_at(ws, graph, made, i)).spec, flags)
+        = clippy_checked(ws.rust, compile_of(ws, graph, made, unit_at(ws, graph, made, i)).spec, flags, ws.clippy_config)
     }
 }
 
@@ -652,8 +680,10 @@ fn member_id(ws: RustWorkspace, package: String) -> String {
 
 # How rustdoc tests the documentation of the library that the doctest unit
 # `at` of `graph` names, those it depends on built as `made` has them, as
-# Cargo has it test them: given what its compile would be, but no profile,
-# no native libraries and no link arguments of its own.
+# Cargo has it test them: given what its compile would be, but no profile
+# but its link-time optimisation, as Cargo gives rustdoc the doctests' (so
+# that libraries compiled to bitcode alone for them link), no native
+# libraries and no link arguments of its own.
 fn doctest_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) -> CompileSpec {
     let unit = graph.units[at.index]
     let target = unit.target
@@ -668,7 +698,7 @@ fn doctest_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         target.src_path.strip_prefix("{SRC}/"),
         "--test-run-directory={path.dirname(at.package.manifest_path)}",
         ...facts.lints,
-        "-Cembed-bitcode=no",
+        ...lto_args(lto_of(graph)[at.index]),
         ...(for each in unit.features { = "--cfg=feature=\"{each}\"" }),
         ...facts.check_cfg,
         "-Clinker={OPT_CC}/{ws.rust.cc.path.strip_prefix(ws.rust.cc_root.path).strip_prefix("/")}",
@@ -862,6 +892,11 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
             runs := [...runs, dep.index]
             continue
         }
+        # A program of its package, which an integration test runs: no
+        # crate of its, but named by `CARGO_BIN_EXE_<name>` (see `bin_exes`).
+        if given.kind == "bin" {
+            continue
+        }
         externs := [...externs, {name = dep.extern_crate_name; dir = given.dir; file = given.files[0]}]
         libraries := [...libraries, dep.index]
         # A proc macro runs in the compiler: what it links is none of the
@@ -915,7 +950,7 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         "-Clinker={OPT_CC}/{ws.rust.cc.path.strip_prefix(ws.rust.cc_root.path).strip_prefix("/")}",
         ...(if host { none } else { ["--target={ws.target}", ...ws.rustflags] }),
         ...(if member { none } else { ["--cap-lints=allow"] }),
-        ...(if kind == "proc-macro" { ["--extern=proc_macro"] } else { none }),
+        ...(if target.crate_types.contains("proc-macro") { ["--extern=proc_macro"] } else { none }),
     ]
     let link = if kind == "bin" and target.kind.contains("example") {
         "examples"
@@ -930,7 +965,7 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     }
     let spec: CompileSpec = {
         args = args
-        env = [...crate_env(ws, at.package, unit, crate), ...at.settings.env]
+        env = [...crate_env(ws, at.package, unit, crate), ...bin_exes(graph, unit), ...at.settings.env]
         cwd = SRC
         placed = [...at.placed, ...at.given]
         externs = externs
@@ -940,6 +975,25 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         link = link
     }
     = {kind = kind; files = files; libraries = libraries; runs = runs; spec = spec}
+}
+
+# What Cargo tells a test program of its package when it runs it, as it
+# tells its compile: the package's manifest's directory and its `CARGO_PKG_`
+# variables, but nothing of the crate or of the tools that build it.
+fn run_env(ws: RustWorkspace, unit: Unit) -> List<Entry<String>> {
+    let compiled = ["PATH", "CARGO", "CARGO_CRATE_NAME", "CARGO_BIN_NAME", "CARGO_PRIMARY_PACKAGE", "CARGO_TARGET_TMPDIR"]
+    let crate = unit.target.name.split("-").join("_")
+    = for each in crate_env(ws, package_of(ws, unit.pkg_id), unit, crate) if not compiled.contains(each.key) { = each }
+}
+
+# What an integration test or benchmark, the unit `unit` of `graph`, is
+# told of its package's programs, which it depends on, as Cargo tells it:
+# `CARGO_BIN_EXE_<name>`, where each is when it runs; none for any other.
+fn bin_exes(graph: UnitGraph, unit: Unit) -> List<Entry<String>> {
+    = for dep in unit.dependencies if graph.units[dep.index].target.kind.contains("bin") {
+        let name = graph.units[dep.index].target.name
+        = {key = "CARGO_BIN_EXE_{name}"; value = "{BIN_EXE}/{name}"}
+    }
 }
 
 # What Cargo takes from the manifest of the package `id` that its plans
@@ -1324,18 +1378,21 @@ fn compile(rust: RustToolchain, spec: CompileSpec) -> Dir {
     = box.dir("/work/build")
 }
 
-# The crate `spec` says, checked by Clippy, with `flags` after its own:
-# fails if a lint it denies fires.
+# The crate `spec` says, checked by Clippy, with `flags` after its own and
+# the Clippy configuration `config`, if any, by `CLIPPY_CONF_DIR`: fails if
+# a lint it denies fires.
 #[hermetic]
-fn clippy_checked(rust: RustToolchain, spec: CompileSpec, flags: List<String>) -> {} {
+fn clippy_checked(rust: RustToolchain, spec: CompileSpec, flags: List<String>, config: List<File>) -> {} {
     let given = given_of(rust, spec, true)
     let driver = "{OPT_RUST}/bin/clippy-driver"
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         ...given.placed,
         {at = driver; place = rust.clippy.file("bin/clippy-driver")},
+        ...(for each in config { = {at = "{OPT_CLIPPY_CONF}/{path.basename(each.path)}"; place = each} }),
     ]
+    let configured: List<Entry<String>> = if len(config) > 0 { [{key = "CLIPPY_CONF_DIR"; value = OPT_CLIPPY_CONF}] } else { [] }
     let box = fs.compose(placed).sandbox(cwd = spec.cwd)
-    let ran = box.exec(driver, ...given.args, ...flags, "--emit=metadata", "--out-dir=/work/build", env = environment(given.env))
+    let ran = box.exec(driver, ...given.args, ...flags, "--emit=metadata", "--out-dir=/work/build", env = environment([...given.env, ...configured]))
     = {}
 }
 

@@ -32,10 +32,13 @@
 #   manifest's name and given whole, for Cargo to find each by its name and
 #   version; `git`, the git sources, for Cargo to find in it; and `locals`,
 #   each package of no source, the workspace's own and those it takes by
-#   their paths, as `NAME@VERSION`. A git
-#   crate whose manifest takes a value from its workspace's, `version.
-#   workspace = true` say, is an error: its manifest would need rewriting,
-#   as `cargo vendor` does, to build on its own. So is a git crate of a
+#   their paths, as `NAME@VERSION`. A git crate whose manifest takes a value
+#   from its workspace's, `version.workspace = true` say, or names a path,
+#   a sibling crate's, has its manifest written, by `normalize.py`, to build
+#   on its own: each value it takes written in, each path dependency on a
+#   crate of the repository one on that crate in the git source it is
+#   pinned from, at its exact version, and its development dependencies,
+#   which Cargo never resolves for it, left out. A git crate of a
 #   repository the workspace also imports a library from at another
 #   commit than its host pinned the library at (`libraries`'s
 #   `pinned_libraries`): the library's settings for the crate and the crate
@@ -78,6 +81,8 @@ import libraries
 import unpack from archive
 import toolchain
 import Toolchain from toolchain
+import Toolchain::Python python_3_14 from "github.com/gcslib/python"
+import PythonToolchain from "github.com/gcslib/python"
 import * from "github.com/gcslib/gcc"
 import * from "github.com/gcslib/buildenv"
 
@@ -273,7 +278,16 @@ def vendored(lock: File) -> Vendored {
     }
     let git = git_crates(lock)
     let repositories = for each in git {
-        = {crate = each; repository = fetch_git(each.url, each.commit)}
+        let repository = fetch_git(each.url, each.commit)
+        let found = crate_dir(repository, each.name)
+        let place = if found.normalize {
+            normalized(repository, found.within, each.source, file("normalize.py"))
+        } else if found.within == "" {
+            repository
+        } else {
+            repository.dir(found.within)
+        }
+        = {crate = each; place = place}
     }
     let mut locals: List<String> = []
     for package in packages(lock) {
@@ -312,9 +326,11 @@ fn same_repository(a: String, b: String) -> Bool {
 
 # The directory of the crate `name` in the repository files `repository`,
 # from its root, `""` for the root itself: the one whose manifest's
-# `[package]` names it.
-fn crate_dir(repository: Dir, name: String) -> String {
-    let mut found: List<String> = []
+# `[package]` names it; and whether its manifest is to be normalized, as it
+# takes values from its workspace's or names a path, a sibling crate's say,
+# which a crate given on its own has neither of.
+fn crate_dir(repository: Dir, name: String) -> {within: String, normalize: Bool} {
+    let mut found: List<{within: String, normalize: Bool}> = []
     for each in repository.files() {
         let path = each.path.strip_prefix(repository.path).strip_prefix("/")
         if not (path == "Cargo.toml" or path.ends_with("/Cargo.toml")) {
@@ -327,10 +343,7 @@ fn crate_dir(repository: Dir, name: String) -> String {
             if line.starts_with("[") {
                 in_package := line == "[package]"
             } else if in_package and line == "name = \"{name}\"" {
-                if text.contains("workspace = true") {
-                    panic("the git crate `{name}`'s manifest, `{path}`, takes values from its workspace's, which a crate given on its own can't")
-                }
-                found := [...found, path.strip_suffix("Cargo.toml").strip_suffix("/")]
+                found := [...found, {within = path.strip_suffix("Cargo.toml").strip_suffix("/"); normalize = text.contains("workspace = true") or text.contains("path =")}]
             }
         }
     }
@@ -340,6 +353,34 @@ fn crate_dir(repository: Dir, name: String) -> String {
     = found[0]
 }
 
+# The python library's pinned Python, which normalizes git crates'
+# manifests.
+fn vendoring_python() -> PythonToolchain {
+    let made = (Toolchain::Python python_3_14)().made()
+    let python: Toolchain = made.provides
+    = Toolchain::Python.payload(python)
+}
+
+# The crate at `within` in the repository files `repository`, its manifest
+# written for it to build on its own, by `tool`, `normalize.py`, with the
+# python library's pinned Python: each value it takes from its workspace's
+# written in, each dependency on a sibling crate's path one on that crate
+# in the git source `source` it is pinned from, at its exact version, and
+# its development dependencies left out.
+#[hermetic]
+fn normalized(repository: Dir, within: String, source: String, tool: File, python: PythonToolchain = vendoring_python()) -> Dir {
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = python.runtime},
+        {at = "/opt/python"; place = python.root},
+        {at = "/work/repository"; place = repository},
+        {at = "/work/normalize.py"; place = tool},
+    ]
+    let box = fs.compose(placed).sandbox(cwd = "/work")
+    let python_at = "/opt/python/{python.python.path.strip_prefix(python.root.path).strip_prefix("/")}"
+    let ran = box.exec(python_at, "-I", "/work/normalize.py", "/work/repository", if within == "" { "." } else { within }, source, "/work/out/crate")
+    = box.dir("/work/out/crate")
+}
+
 # The crates `fetched`, each with its unpacked tree, as `cargo vendor` lays
 # them out: each under `NAME-VERSION`, with the record of its checksum Cargo
 # reads, which names no file, so that Cargo checks the crate it was given
@@ -347,7 +388,7 @@ fn crate_dir(repository: Dir, name: String) -> String {
 #[hermetic]
 fn vendor(
     fetched: List<{crate: Crate, tree: Dir}>,
-    repositories: List<{crate: GitCrate, repository: Dir}>,
+    repositories: List<{crate: GitCrate, place: Dir}>,
 ) -> Dir {
     let records = working_dir().path
     # A git crate's record names no checksum: its commit pins it.
@@ -355,10 +396,8 @@ fn vendor(
     let wrote = fs.write(git_record, "{{\"files\": {{}}, \"package\": null}}")
     let from_git = for each in repositories {
         let at = "{each.crate.name}-{each.crate.version}"
-        let within = crate_dir(each.repository, each.crate.name)
-        let place = if within == "" { each.repository } else { each.repository.dir(within) }
         let pair: List<{at: String, place: Dir | File | FileSet}> = [
-            {at = at; place = place},
+            {at = at; place = each.place},
             {at = "{at}/.cargo-checksum.json"; place = file(git_record)},
         ]
         = pair
