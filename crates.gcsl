@@ -289,7 +289,8 @@ fn planned_in(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, target:
 }
 
 # What `cargo metadata` says of the workspace whose skeleton is `skeleton`,
-# for `target`.
+# for `target`, with every feature on, so that it describes every package
+# a plan with any features names, an optional dependency's say.
 #[hermetic]
 fn cargo_metadata(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, target: String) -> File {
     let box = planned_in(rust, skeleton, vendor, target)
@@ -298,6 +299,7 @@ fn cargo_metadata(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, tar
         "metadata",
         "--format-version",
         "1",
+        "--all-features",
         "--frozen",
         "--offline",
         "--filter-platform",
@@ -1255,7 +1257,7 @@ fn settings_of(ws: RustWorkspace, name: String) -> CrateSettings {
 # the workspace's own, or a vendored crate's.
 fn crate_dir(ws: RustWorkspace, root: String) -> Dir {
     if root == SRC {
-        return ws.src
+        return root_dir(ws)
     }
     if root.starts_with("{SRC}/") {
         return ws.src.dir(root.strip_prefix("{SRC}/"))
@@ -1264,6 +1266,24 @@ fn crate_dir(ws: RustWorkspace, root: String) -> Dir {
         return ws.vendor.crates.dir(root.strip_prefix("{VENDOR}/"))
     }
     panic("a package outside the workspace and its vendored crates, at `{root}`")
+}
+
+# The directory of a package at the workspace's root: what the skeleton
+# keeps of the root, each entry at its top, without the build's outputs and
+# hidden directories, which a step is not given.
+fn root_dir(ws: RustWorkspace) ->> Dir {
+    let kept = [...(for each in ws.skeleton.manifests { = each.at }), ...ws.skeleton.paths]
+    let tops = (for each in kept { = each.split("/")[0] }).unique()
+    = composed(for top in tops {
+        let place: Dir | File = if kept.contains(top) { ws.src.file(top) } else { ws.src.dir(top) }
+        = {at = top; place = place}
+    })
+}
+
+# `entries`, each placed at its path, as one directory.
+#[hermetic]
+fn composed(entries: List<{at: String, place: Dir | File}>) -> Dir {
+    = fs.compose(for each in entries { = {at = each.at; place = each.place} })
 }
 
 # `text` with its ASCII letters in upper case.
