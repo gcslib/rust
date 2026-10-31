@@ -92,7 +92,8 @@ with the same features, share them.
 A member's crates are compiled with what Cargo takes from its manifest and
 its plans leave out: its `[lints]`, its `--check-cfg` flags and which of its
 targets have no test harness, which `manifests.py` reads, and link-time
-optimization worked out per crate as Cargo works it out.
+optimization worked out per crate as Cargo works it out. Its profile's
+`strip` applies as Cargo applies it.
 
 It needs the [gcc](https://github.com/gcslib/gcc),
 [buildenv](https://github.com/gcslib/buildenv) and

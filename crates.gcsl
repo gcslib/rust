@@ -147,6 +147,12 @@ type Metadata = {packages: List<MetaPackage>, workspace_members: List<String>}
 # A unit of a build as `cargo build --unit-graph` describes it.
 type UnitTarget = {kind: List<String>, crate_types: List<String>, name: String, src_path: String, edition: String}
 
+# A profile's `strip` as the plan describes it: `"None"`, or the level by
+# name, under the one key of the two Cargo settled it by.
+type StripLevel = String | {Named: String}
+
+type UnitStrip = {resolved: StripLevel = "None", deferred: StripLevel = "None"}
+
 type UnitProfile = {
     opt_level: String,
     debuginfo: Int | String = 0,
@@ -155,6 +161,7 @@ type UnitProfile = {
     panic: String = "unwind",
     lto: String = "false",
     codegen_units: Int = 0,
+    strip: UnitStrip = {},
 }
 
 type UnitDep = {index: Int, extern_crate_name: String}
@@ -1169,14 +1176,16 @@ fn merged_lto(lto: String, had: String) -> String {
 fn profile_args(profile: UnitProfile) -> List<String> {
     let mut args = ["-Copt-level={profile.opt_level}"]
     let debuginfo = profile.debuginfo
-    if debuginfo is Int {
-        if debuginfo == 0 {
-            args := [...args, "-Cstrip=debuginfo"]
-        } else {
-            args := [...args, "-Cdebuginfo={debuginfo}"]
-        }
-    } else {
+    let none = if debuginfo is Int { debuginfo == 0 } else { false }
+    if not none {
         args := [...args, "-Cdebuginfo={debuginfo}"]
+    }
+    # Cargo settles it, `debuginfo` for a profile with no debug information
+    # and no `strip` of its own, and either way tells rustc a level by name.
+    for level in [profile.strip.resolved, profile.strip.deferred] {
+        if level is {Named: String} {
+            args := [...args, "-Cstrip={level.Named}"]
+        }
     }
     let switch = fn(on: Bool): String { if on { "on" } else { "off" } }
     args := [
