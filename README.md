@@ -76,7 +76,11 @@ with the same features, share them.
 - `clippy(ws, package)`: Clippy's checks of a member, as `cargo clippy
   --all-targets` makes them, each crate a step, with `flags` after its
   lints, `-Dwarnings` say, and the workspace's `clippy.toml` or
-  `.clippy.toml` if it has one.
+  `.clippy.toml` if it has one. Clippy's `cargo` lints read `cargo
+  metadata`, which a crate's step cannot, so these checks allow them.
+- `cargo_lints(ws)`: Clippy's `cargo` lints of the whole workspace, one
+  step that plans as Cargo does with the network off, with `flags` if given,
+  `-Wclippy::cargo -Dwarnings` say.
 - `docs(ws, package)`: the documentation of a member's library, made by
   rustdoc as `cargo doc --no-deps` makes it, a step, with `flags` after
   its lints, `-Dwarnings` say.

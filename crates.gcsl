@@ -55,7 +55,15 @@
 #   `flags` given after the lints, `-Dwarnings` say, and the workspace's
 #   `clippy.toml` or `.clippy.toml`, if it has one, as Clippy finds it
 #   above a crate's manifest. A check fails as its compile would, so a lint
-#   denied fails it.
+#   denied fails it. Clippy's `cargo` lints are allowed in these checks: they
+#   read `cargo metadata`, which a crate's step cannot, and `cargo_lints`
+#   checks them.
+# - `cargo_lints(ws)`: Clippy's `cargo` lints of the workspace, as `cargo
+#   clippy --workspace` makes them, one step: the sandbox Cargo plans in,
+#   the network off, with an empty crate compiled in each member's name, as
+#   the lints read the manifests and no source. `[lints]` naming these lints
+#   apply, then `flags`, `-Wclippy::cargo -Dwarnings` say, and the Clippy
+#   configuration `clippy` has.
 # - `docs(ws, package)`: the documentation of the member `package`'s
 #   library, made by rustdoc as a step, as `cargo doc --no-deps` makes it,
 #   `flags` given after the lints, `-Dwarnings` say: the directory rustdoc
@@ -97,6 +105,19 @@ let BIN_EXE = "/work/bin"
 
 # Where a Clippy check's sandbox has the workspace's Clippy configuration.
 let OPT_CLIPPY_CONF = "/opt/clippy"
+
+# Clippy's `cargo` group and the lints of it, which read `cargo metadata`.
+let CARGO_LINTS = [
+    "cargo",
+    "cargo_common_metadata",
+    "multiple_crate_versions",
+    "negative_feature_names",
+    "redundant_feature_names",
+    "wildcard_dependencies",
+]
+
+# Where `cargo_lints` has the empty crate it compiles in a member's name.
+let EMPTY_CRATE = "/work/empty.rs"
 
 # Where the step that reads the manifests has Python.
 let OPT_PYTHON = "/opt/python"
@@ -290,8 +311,15 @@ fn is_manifest(at: String) -> Bool {
 # --- Planning ---
 
 # A sandbox of the toolchain, the skeleton of a workspace at `/work/src`
-# and its vendored crates, in which Cargo plans a build for `target`.
-fn planned_in(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, target: String) -> Sandbox {
+# and its vendored crates, in which Cargo plans a build for `target`, with
+# `besides` placed too.
+fn planned_in(
+    rust: RustToolchain,
+    skeleton: Skeleton,
+    vendor: Vendored,
+    target: String,
+    besides: List<{at: String, place: Dir | File | FileSet}> = [],
+) -> Sandbox {
     let home = working_dir().path
     let empty = "{home}/empty"
     let made = fs.write(empty, "")
@@ -307,6 +335,7 @@ fn planned_in(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, target:
         ...(for each in skeleton.paths { = {at = "{SRC}/{each}"; place = file(empty)} }),
         {at = VENDOR; place = vendor.crates},
         {at = "/work/home/config.toml"; place = file(config)},
+        ...besides,
     ]
     = fs.compose(placed).sandbox(
         cwd = SRC,
@@ -640,6 +669,22 @@ def clippy(
         ...checked(ws, planned(ws, package, "build", features), package, flags),
         ...checked(ws, planned(ws, package, "clippy", features), package, flags),
     ]
+}
+
+def cargo_lints(ws: RustWorkspace, flags: List<String> = []) -> {} {
+    let members = for each in ws.metadata.packages if ws.metadata.workspace_members.contains(each.id) {
+        = {
+            crate = each.name.split("-").join("_")
+            lints = for flag in facts_of(ws, each.id).lints if names_cargo_lint(flag) { = flag }
+        }
+    }
+    = cargo_linted(ws.rust, ws.skeleton, ws.vendor, ws.target, members, flags, ws.clippy_config)
+}
+
+# Whether the lint flag `flag`, as `manifests.py` writes it, names Clippy's
+# `cargo` group or a lint of it.
+fn names_cargo_lint(flag: String) -> Bool {
+    = (for each in CARGO_LINTS if flag.ends_with("=clippy::{each}") { = each }).len() > 0
 }
 
 def docs(
@@ -1421,7 +1466,60 @@ fn clippy_checked(rust: RustToolchain, spec: CompileSpec, flags: List<String>, c
     ]
     let configured: List<Entry<String>> = if len(config) > 0 { [{key = "CLIPPY_CONF_DIR"; value = OPT_CLIPPY_CONF}] } else { [] }
     let box = fs.compose(placed).sandbox(cwd = spec.cwd)
-    let ran = box.exec(driver, ...given.args, ...flags, "--emit=metadata", "--out-dir=/work/build", env = environment([...given.env, ...configured]))
+    # After `flags`: only `cargo_lints`, in a sandbox with Cargo, can check
+    # these.
+    let ran = box.exec(driver, ...given.args, ...flags, "-Aclippy::cargo", "--emit=metadata", "--out-dir=/work/build", env = environment([...given.env, ...configured]))
+    = {}
+}
+
+# Clippy's `cargo` lints of the workspace whose skeleton is `skeleton`, read
+# from `cargo metadata`, which Clippy runs from the workspace's root with
+# the network off, as `cargo clippy` runs it, and the Clippy configuration
+# `config`, if any: an empty crate compiled in each of `members`' names,
+# with its lints and `flags`. Fails if a lint it denies fires.
+#[hermetic]
+fn cargo_linted(
+    rust: RustToolchain,
+    skeleton: Skeleton,
+    vendor: Vendored,
+    target: String,
+    members: List<{crate: String, lints: List<String>}>,
+    flags: List<String>,
+    config: List<File>,
+) -> {} {
+    let empty = "{working_dir().path}/empty.rs"
+    let made = fs.write(empty, "")
+    let driver = "{OPT_RUST}/bin/clippy-driver"
+    let besides: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = EMPTY_CRATE; place = file(empty)},
+        {at = driver; place = rust.clippy.file("bin/clippy-driver")},
+        ...(for each in config { = {at = "{OPT_CLIPPY_CONF}/{path.basename(each.path)}"; place = each} }),
+    ]
+    let box = planned_in(rust, skeleton, vendor, target, besides)
+    let configured: List<Entry<String>> = if len(config) > 0 { [{key = "CLIPPY_CONF_DIR"; value = OPT_CLIPPY_CONF}] } else { [] }
+    let env = [
+        {key = "PATH"; value = "{OPT_RUST}/bin:{OPT_CC}/bin"},
+        {key = "HOME"; value = "/work/home"},
+        {key = "CARGO"; value = "{OPT_RUST}/bin/cargo"},
+        {key = "CARGO_HOME"; value = "/work/home"},
+        {key = "CARGO_NET_OFFLINE"; value = "true"},
+        {key = "CARGO_TARGET_DIR"; value = "/work/target"},
+        ...configured,
+    ]
+    let ran = for each in members {
+        = box.exec(
+            driver,
+            "--crate-name={each.crate}",
+            "--crate-type=lib",
+            "--edition=2021",
+            EMPTY_CRATE,
+            ...each.lints,
+            ...flags,
+            "--emit=metadata",
+            "--out-dir=/work/build/{each.crate}",
+            env = environment(env),
+        )
+    }
     = {}
 }
 
