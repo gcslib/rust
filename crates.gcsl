@@ -40,11 +40,12 @@
 #   with the package's programs an integration test runs, which
 #   `CARGO_BIN_EXE_<name>` names, as Cargo builds and names them;
 #   `run_test(test)` runs one, a step, in a sandbox of the toolchain's
-#   runtime with a writable `/tmp`, told of its package as Cargo tells a
-#   test it runs, `CARGO_MANIFEST_DIR` and `CARGO_PKG_VERSION` say, those
-#   programs where it was told,
-#   `given` placed at their paths, `env` set and `args` its arguments, and
-#   fails if it does.
+#   runtime with a writable `/tmp`, from its package's directory, which it
+#   holds, with the package's `data` and `beside`, as Cargo runs a test,
+#   told of its package as Cargo tells a test it runs, `CARGO_MANIFEST_DIR`
+#   and `CARGO_PKG_VERSION` say, those programs where it was told, `given`
+#   placed at their paths, `env` set and `args` its arguments, and fails if
+#   it does. What is given at a path the package has is not placed twice.
 # - `doctests(ws, package)`: the tests of the member `package`'s
 #   documentation, each crate's run by rustdoc as a step, as `cargo test
 #   --doc` runs them, with `given` and `env` as `run_test` has them; none
@@ -54,7 +55,15 @@
 #   `flags` given after the lints, `-Dwarnings` say, and the workspace's
 #   `clippy.toml` or `.clippy.toml`, if it has one, as Clippy finds it
 #   above a crate's manifest. A check fails as its compile would, so a lint
-#   denied fails it.
+#   denied fails it. Clippy's `cargo` lints are allowed in these checks: they
+#   read `cargo metadata`, which a crate's step cannot, and `cargo_lints`
+#   checks them.
+# - `cargo_lints(ws)`: Clippy's `cargo` lints of the workspace, as `cargo
+#   clippy --workspace` makes them, one step: the sandbox Cargo plans in,
+#   the network off, with an empty crate compiled in each member's name, as
+#   the lints read the manifests and no source. `[lints]` naming these lints
+#   apply, then `flags`, `-Wclippy::cargo -Dwarnings` say, and the Clippy
+#   configuration `clippy` has.
 # - `docs(ws, package)`: the documentation of the member `package`'s
 #   library, made by rustdoc as a step, as `cargo doc --no-deps` makes it,
 #   `flags` given after the lints, `-Dwarnings` say: the directory rustdoc
@@ -96,6 +105,19 @@ let BIN_EXE = "/work/bin"
 
 # Where a Clippy check's sandbox has the workspace's Clippy configuration.
 let OPT_CLIPPY_CONF = "/opt/clippy"
+
+# Clippy's `cargo` group and the lints of it, which read `cargo metadata`.
+let CARGO_LINTS = [
+    "cargo",
+    "cargo_common_metadata",
+    "multiple_crate_versions",
+    "negative_feature_names",
+    "redundant_feature_names",
+    "wildcard_dependencies",
+]
+
+# Where `cargo_lints` has the empty crate it compiles in a member's name.
+let EMPTY_CRATE = "/work/empty.rs"
 
 # Where the step that reads the manifests has Python.
 let OPT_PYTHON = "/opt/python"
@@ -147,6 +169,12 @@ type Metadata = {packages: List<MetaPackage>, workspace_members: List<String>}
 # A unit of a build as `cargo build --unit-graph` describes it.
 type UnitTarget = {kind: List<String>, crate_types: List<String>, name: String, src_path: String, edition: String}
 
+# A profile's `strip` as the plan describes it: `"None"`, or the level by
+# name, under the one key of the two Cargo settled it by.
+type StripLevel = String | {Named: String}
+
+type UnitStrip = {resolved: StripLevel = "None", deferred: StripLevel = "None"}
+
 type UnitProfile = {
     opt_level: String,
     debuginfo: Int | String = 0,
@@ -155,6 +183,7 @@ type UnitProfile = {
     panic: String = "unwind",
     lto: String = "false",
     codegen_units: Int = 0,
+    strip: UnitStrip = {},
 }
 
 type UnitDep = {index: Int, extern_crate_name: String}
@@ -282,8 +311,15 @@ fn is_manifest(at: String) -> Bool {
 # --- Planning ---
 
 # A sandbox of the toolchain, the skeleton of a workspace at `/work/src`
-# and its vendored crates, in which Cargo plans a build for `target`.
-fn planned_in(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, target: String) -> Sandbox {
+# and its vendored crates, in which Cargo plans a build for `target`, with
+# `besides` placed too.
+fn planned_in(
+    rust: RustToolchain,
+    skeleton: Skeleton,
+    vendor: Vendored,
+    target: String,
+    besides: List<{at: String, place: Dir | File | FileSet}> = [],
+) -> Sandbox {
     let home = working_dir().path
     let empty = "{home}/empty"
     let made = fs.write(empty, "")
@@ -299,6 +335,7 @@ fn planned_in(rust: RustToolchain, skeleton: Skeleton, vendor: Vendored, target:
         ...(for each in skeleton.paths { = {at = "{SRC}/{each}"; place = file(empty)} }),
         {at = VENDOR; place = vendor.crates},
         {at = "/work/home/config.toml"; place = file(config)},
+        ...besides,
     ]
     = fs.compose(placed).sandbox(
         cwd = SRC,
@@ -477,11 +514,15 @@ type RunSpec = {
     cfg: File,
 }
 
-# A test program of a member, by its name, with what runs it.
+# A test program of a member, by its name, with what runs it: `at`, its
+# package's directory, which it runs from, and `placed`, what its sandbox
+# holds of its package.
 type RustTest = {
     name: String,
     program: File,
     rust: RustToolchain,
+    at: String,
+    placed: List<{at: String, place: Dir | File}> = [],
     programs: List<{at: String, place: File}> = [],
     env: List<Entry<String>> = [],
 }
@@ -561,10 +602,13 @@ def tests(ws: RustWorkspace, package: String, features: List<String> = []) -> Li
     let roots = for i in 0..len(graph.units) if graph.units[i].mode == "test" { = i }
     let made = built(ws, graph, roots)
     = for i in roots {
+        let package = unit_at(ws, graph, made, i)
         = {
             name = graph.units[i].target.name
             program = made[i].dir.file(made[i].files[0])
             rust = ws.rust
+            at = path.dirname(package.package.manifest_path)
+            placed = package.placed
             programs = for dep in graph.units[i].dependencies if graph.units[dep.index].target.kind.contains("bin") {
                 let built = made[dep.index]
                 = {at = "{BIN_EXE}/{graph.units[dep.index].target.name}"; place = built.dir.file(built.files[0])}
@@ -581,13 +625,17 @@ def run_test(
     env: List<Entry<String>> = [],
     args: List<String> = [],
 ) -> {} {
+    # What a test is given may already be its package's, a sibling member
+    # whole beside it say: each path is placed once.
+    let had = for each in test.placed { = each.at }
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = test.rust.runtime},
         {at = "/work/test"; place = test.program},
         ...(for each in test.programs { = {at = each.at; place = each.place} }),
-        ...(for each in given { = {at = each.at; place = each.place} }),
+        ...(for each in test.placed { = {at = each.at; place = each.place} }),
+        ...(for each in given if not had.contains(each.at) { = {at = each.at; place = each.place} }),
     ]
-    let box = fs.compose(placed).sandbox(cwd = "/work")
+    let box = fs.compose(placed).sandbox(cwd = test.at)
     let ran = box.exec("/work/test", ...args, env = environment([{key = "PATH"; value = "/usr/bin:/bin"}, ...test.env, ...env]))
 }
 
@@ -621,6 +669,22 @@ def clippy(
         ...checked(ws, planned(ws, package, "build", features), package, flags),
         ...checked(ws, planned(ws, package, "clippy", features), package, flags),
     ]
+}
+
+def cargo_lints(ws: RustWorkspace, flags: List<String> = []) -> {} {
+    let members = for each in ws.metadata.packages if ws.metadata.workspace_members.contains(each.id) {
+        = {
+            crate = each.name.split("-").join("_")
+            lints = for flag in facts_of(ws, each.id).lints if names_cargo_lint(flag) { = flag }
+        }
+    }
+    = cargo_linted(ws.rust, ws.skeleton, ws.vendor, ws.target, members, flags, ws.clippy_config)
+}
+
+# Whether the lint flag `flag`, as `manifests.py` writes it, names Clippy's
+# `cargo` group or a lint of it.
+fn names_cargo_lint(flag: String) -> Bool {
+    = (for each in CARGO_LINTS if flag.ends_with("=clippy::{each}") { = each }).len() > 0
 }
 
 def docs(
@@ -1169,14 +1233,16 @@ fn merged_lto(lto: String, had: String) -> String {
 fn profile_args(profile: UnitProfile) -> List<String> {
     let mut args = ["-Copt-level={profile.opt_level}"]
     let debuginfo = profile.debuginfo
-    if debuginfo is Int {
-        if debuginfo == 0 {
-            args := [...args, "-Cstrip=debuginfo"]
-        } else {
-            args := [...args, "-Cdebuginfo={debuginfo}"]
-        }
-    } else {
+    let none = if debuginfo is Int { debuginfo == 0 } else { false }
+    if not none {
         args := [...args, "-Cdebuginfo={debuginfo}"]
+    }
+    # Cargo settles it, `debuginfo` for a profile with no debug information
+    # and no `strip` of its own, and either way tells rustc a level by name.
+    for level in [profile.strip.resolved, profile.strip.deferred] {
+        if level is {Named: String} {
+            args := [...args, "-Cstrip={level.Named}"]
+        }
     }
     let switch = fn(on: Bool): String { if on { "on" } else { "off" } }
     args := [
@@ -1400,7 +1466,60 @@ fn clippy_checked(rust: RustToolchain, spec: CompileSpec, flags: List<String>, c
     ]
     let configured: List<Entry<String>> = if len(config) > 0 { [{key = "CLIPPY_CONF_DIR"; value = OPT_CLIPPY_CONF}] } else { [] }
     let box = fs.compose(placed).sandbox(cwd = spec.cwd)
-    let ran = box.exec(driver, ...given.args, ...flags, "--emit=metadata", "--out-dir=/work/build", env = environment([...given.env, ...configured]))
+    # After `flags`: only `cargo_lints`, in a sandbox with Cargo, can check
+    # these.
+    let ran = box.exec(driver, ...given.args, ...flags, "-Aclippy::cargo", "--emit=metadata", "--out-dir=/work/build", env = environment([...given.env, ...configured]))
+    = {}
+}
+
+# Clippy's `cargo` lints of the workspace whose skeleton is `skeleton`, read
+# from `cargo metadata`, which Clippy runs from the workspace's root with
+# the network off, as `cargo clippy` runs it, and the Clippy configuration
+# `config`, if any: an empty crate compiled in each of `members`' names,
+# with its lints and `flags`. Fails if a lint it denies fires.
+#[hermetic]
+fn cargo_linted(
+    rust: RustToolchain,
+    skeleton: Skeleton,
+    vendor: Vendored,
+    target: String,
+    members: List<{crate: String, lints: List<String>}>,
+    flags: List<String>,
+    config: List<File>,
+) -> {} {
+    let empty = "{working_dir().path}/empty.rs"
+    let made = fs.write(empty, "")
+    let driver = "{OPT_RUST}/bin/clippy-driver"
+    let besides: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = EMPTY_CRATE; place = file(empty)},
+        {at = driver; place = rust.clippy.file("bin/clippy-driver")},
+        ...(for each in config { = {at = "{OPT_CLIPPY_CONF}/{path.basename(each.path)}"; place = each} }),
+    ]
+    let box = planned_in(rust, skeleton, vendor, target, besides)
+    let configured: List<Entry<String>> = if len(config) > 0 { [{key = "CLIPPY_CONF_DIR"; value = OPT_CLIPPY_CONF}] } else { [] }
+    let env = [
+        {key = "PATH"; value = "{OPT_RUST}/bin:{OPT_CC}/bin"},
+        {key = "HOME"; value = "/work/home"},
+        {key = "CARGO"; value = "{OPT_RUST}/bin/cargo"},
+        {key = "CARGO_HOME"; value = "/work/home"},
+        {key = "CARGO_NET_OFFLINE"; value = "true"},
+        {key = "CARGO_TARGET_DIR"; value = "/work/target"},
+        ...configured,
+    ]
+    let ran = for each in members {
+        = box.exec(
+            driver,
+            "--crate-name={each.crate}",
+            "--crate-type=lib",
+            "--edition=2021",
+            EMPTY_CRATE,
+            ...each.lints,
+            ...flags,
+            "--emit=metadata",
+            "--out-dir=/work/build/{each.crate}",
+            env = environment(env),
+        )
+    }
     = {}
 }
 

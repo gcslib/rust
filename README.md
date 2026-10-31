@@ -68,14 +68,19 @@ with the same features, share them.
   with `features` if given.
 - `tests(ws, package)`: a member's test programs, with `features` if
   given, each integration test with the package's programs that
-  `CARGO_BIN_EXE_<name>` names; `run_test(test)` runs one, with those
-  programs where it was told, and `args` if given.
+  `CARGO_BIN_EXE_<name>` names; `run_test(test)` runs one from its
+  package's directory, as Cargo does, with the package there, those programs
+  where it was told, and `args` if given.
 - `doctests(ws, package)`: a member's documentation tests, run by rustdoc
   as `cargo test --doc` runs them, each crate's a step.
 - `clippy(ws, package)`: Clippy's checks of a member, as `cargo clippy
   --all-targets` makes them, each crate a step, with `flags` after its
   lints, `-Dwarnings` say, and the workspace's `clippy.toml` or
-  `.clippy.toml` if it has one.
+  `.clippy.toml` if it has one. Clippy's `cargo` lints read `cargo
+  metadata`, which a crate's step cannot, so these checks allow them.
+- `cargo_lints(ws)`: Clippy's `cargo` lints of the whole workspace, one
+  step that plans as Cargo does with the network off, with `flags` if given,
+  `-Wclippy::cargo -Dwarnings` say.
 - `docs(ws, package)`: the documentation of a member's library, made by
   rustdoc as `cargo doc --no-deps` makes it, a step, with `flags` after
   its lints, `-Dwarnings` say.
@@ -92,7 +97,8 @@ with the same features, share them.
 A member's crates are compiled with what Cargo takes from its manifest and
 its plans leave out: its `[lints]`, its `--check-cfg` flags and which of its
 targets have no test harness, which `manifests.py` reads, and link-time
-optimization worked out per crate as Cargo works it out.
+optimization worked out per crate as Cargo works it out. Its profile's
+`strip` applies as Cargo applies it.
 
 It needs the [gcc](https://github.com/gcslib/gcc),
 [buildenv](https://github.com/gcslib/buildenv) and
