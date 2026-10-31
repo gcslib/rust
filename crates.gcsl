@@ -40,11 +40,12 @@
 #   with the package's programs an integration test runs, which
 #   `CARGO_BIN_EXE_<name>` names, as Cargo builds and names them;
 #   `run_test(test)` runs one, a step, in a sandbox of the toolchain's
-#   runtime with a writable `/tmp`, told of its package as Cargo tells a
-#   test it runs, `CARGO_MANIFEST_DIR` and `CARGO_PKG_VERSION` say, those
-#   programs where it was told,
-#   `given` placed at their paths, `env` set and `args` its arguments, and
-#   fails if it does.
+#   runtime with a writable `/tmp`, from its package's directory, which it
+#   holds, with the package's `data` and `beside`, as Cargo runs a test,
+#   told of its package as Cargo tells a test it runs, `CARGO_MANIFEST_DIR`
+#   and `CARGO_PKG_VERSION` say, those programs where it was told, `given`
+#   placed at their paths, `env` set and `args` its arguments, and fails if
+#   it does. What is given at a path the package has is not placed twice.
 # - `doctests(ws, package)`: the tests of the member `package`'s
 #   documentation, each crate's run by rustdoc as a step, as `cargo test
 #   --doc` runs them, with `given` and `env` as `run_test` has them; none
@@ -484,11 +485,15 @@ type RunSpec = {
     cfg: File,
 }
 
-# A test program of a member, by its name, with what runs it.
+# A test program of a member, by its name, with what runs it: `at`, its
+# package's directory, which it runs from, and `placed`, what its sandbox
+# holds of its package.
 type RustTest = {
     name: String,
     program: File,
     rust: RustToolchain,
+    at: String,
+    placed: List<{at: String, place: Dir | File}> = [],
     programs: List<{at: String, place: File}> = [],
     env: List<Entry<String>> = [],
 }
@@ -568,10 +573,13 @@ def tests(ws: RustWorkspace, package: String, features: List<String> = []) -> Li
     let roots = for i in 0..len(graph.units) if graph.units[i].mode == "test" { = i }
     let made = built(ws, graph, roots)
     = for i in roots {
+        let package = unit_at(ws, graph, made, i)
         = {
             name = graph.units[i].target.name
             program = made[i].dir.file(made[i].files[0])
             rust = ws.rust
+            at = path.dirname(package.package.manifest_path)
+            placed = package.placed
             programs = for dep in graph.units[i].dependencies if graph.units[dep.index].target.kind.contains("bin") {
                 let built = made[dep.index]
                 = {at = "{BIN_EXE}/{graph.units[dep.index].target.name}"; place = built.dir.file(built.files[0])}
@@ -588,13 +596,17 @@ def run_test(
     env: List<Entry<String>> = [],
     args: List<String> = [],
 ) -> {} {
+    # What a test is given may already be its package's, a sibling member
+    # whole beside it say: each path is placed once.
+    let had = for each in test.placed { = each.at }
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = test.rust.runtime},
         {at = "/work/test"; place = test.program},
         ...(for each in test.programs { = {at = each.at; place = each.place} }),
-        ...(for each in given { = {at = each.at; place = each.place} }),
+        ...(for each in test.placed { = {at = each.at; place = each.place} }),
+        ...(for each in given if not had.contains(each.at) { = {at = each.at; place = each.place} }),
     ]
-    let box = fs.compose(placed).sandbox(cwd = "/work")
+    let box = fs.compose(placed).sandbox(cwd = test.at)
     let ran = box.exec("/work/test", ...args, env = environment([{key = "PATH"; value = "/usr/bin:/bin"}, ...test.env, ...env]))
 }
 

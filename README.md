@@ -68,8 +68,9 @@ with the same features, share them.
   with `features` if given.
 - `tests(ws, package)`: a member's test programs, with `features` if
   given, each integration test with the package's programs that
-  `CARGO_BIN_EXE_<name>` names; `run_test(test)` runs one, with those
-  programs where it was told, and `args` if given.
+  `CARGO_BIN_EXE_<name>` names; `run_test(test)` runs one from its
+  package's directory, as Cargo does, with the package there, those programs
+  where it was told, and `args` if given.
 - `doctests(ws, package)`: a member's documentation tests, run by rustdoc
   as `cargo test --doc` runs them, each crate's a step.
 - `clippy(ws, package)`: Clippy's checks of a member, as `cargo clippy
