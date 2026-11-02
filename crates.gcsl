@@ -12,9 +12,10 @@
 #   the manifests, the lock and which files there are, never what the
 #   sources say, so a change to a source plans nothing again. `rustflags`
 #   are given to every crate built for the target, after Cargo's, as
-#   `RUSTFLAGS` would be; `crates` are settings of particular packages, a
-#   `CrateSettings` each; `libclang` a directory holding the `libclang.so`
-#   build scripts' bindgen loads, as `cargo_build` has it.
+#   `RUSTFLAGS` would be, and `^extra_rustflags` after them; `crates` are
+#   settings of particular packages, a `CrateSettings` each; `libclang` a
+#   directory holding the `libclang.so` build scripts' bindgen loads, as
+#   `cargo_build` has it.
 # - `CrateSettings`: what a package needs that its manifest does not say:
 #   `data`, files and directories its compiles and its build script read
 #   besides its own directory, each placed at `at` under the workspace, as
@@ -236,6 +237,7 @@ def workspace(
     vendor: Vendored,
     target: String = "x86_64-unknown-linux-gnu",
     rustflags: List<String> = [],
+    ^extra_rustflags,
     crates: List<CrateSettings> = [],
     libclang: List<Dir> = [],
     ignore: List<String> = ["target", "pekit-out"],
@@ -243,6 +245,7 @@ def workspace(
     target_c: toolchain.CToolchain = default_target_c(target),
     python: PythonToolchain = pinned_python(),
 ) ->> RustWorkspace {
+    let flags = [...rustflags, ...extra_rustflags]
     let skeleton = skeleton_of(src, ignore)
     let described = cargo_metadata(rust, skeleton, vendor, target)
     let metadata: Metadata = json.decode(described.read())
@@ -251,7 +254,7 @@ def workspace(
         src = src
         vendor = vendor
         target = target
-        rustflags = rustflags
+        rustflags = flags
         crates = crates
         libclang = libclang
         rust = rust
@@ -259,7 +262,7 @@ def workspace(
         skeleton = skeleton
         metadata = metadata
         facts = facts
-        target_cfg = rustc_cfg(rust, target, rustflags)
+        target_cfg = rustc_cfg(rust, target, flags)
         host_cfg = rustc_cfg(rust, HOST)
         clippy_config = for name in ["clippy.toml", ".clippy.toml"] if fs.exists("{src.path}/{name}") { = src.file(name) }
     }

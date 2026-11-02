@@ -107,6 +107,38 @@ It needs the [gcc](https://github.com/gcslib/gcc),
 The comments at the top of `rust.gcsl` and `crates.gcsl` document each in
 full.
 
+## Building with a distribution's flags
+
+A distribution that builds another repository's definitions, as a
+package workspace imports a project's library and builds `build app()`
+from it, gives every crate that repository compiles its own rustc
+arguments by setting the context `extra_rustflags`. They come after the
+project's `rustflags` and its profile's, as `RUSTFLAGS` would, so they
+can override the profile:
+
+```text
+import "github.com/gcslib/rust"
+import build app from "github.com/example/app"
+
+let flags = ["-Clink-arg=-Wl,--build-id=sha1", "-Cdebuginfo=2", "-Cstrip=none"]
+
+def build main() {
+    = build app() with { extra_rustflags = flags }
+}
+```
+
+Here every program and library `app` builds has a build ID and keeps its
+debug information, which a release profile with none would strip, for a
+debug package to be split from it. The project needs no change for this.
+
+They apply to crates compiled for the target, as `RUSTFLAGS` does with
+`--target`: not to build scripts or procedural macros, which run on the
+build's own machine. `workspace` and `cargo_build` read the context, so
+every build through this library takes it, including a library's
+definitions that pass `rustflags` of their own. A `with` reaches what it
+calls and nothing else. Where nothing sets it, the context is empty and
+every crate is compiled with the same arguments as without it.
+
 ## Status
 
 gcslib is new, and its libraries' APIs can still change. Pin the commit you
