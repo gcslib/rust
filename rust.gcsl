@@ -49,9 +49,9 @@
 #   `x86_64-unknown-linux-musl`: a directory of each by its name. Its
 #   `rustflags` follow the target unless given: for a musl target, static
 #   position-independent programs, which need nothing of the system they run
-#   on, and none for any other. The C a crate compiles through `cc`,
-#   `zstd-sys`'s say, is compiled for the target by `target_c`, by default
-#   the gcc library's musl toolchain for a musl target, which a static musl
+#   on, and none for any other; `^extra_rustflags` follow them. The C a
+#   crate compiles through `cc`, `zstd-sys`'s say, is compiled for the
+#   target by `target_c`, by default the gcc library's musl toolchain for a musl target, which a static musl
 #   program needs, and the registered C toolchain for any other. `beside` are directories
 #   the source takes by their paths, each placed at its path, `at`, beside
 #   the source as `../AT` reaches it: another repository's crate, say.
@@ -77,6 +77,15 @@
 #   the C toolchain a build for `target` takes unless given, as
 #   `cargo_build` describes them; `builtin_headers(c)`, the directory of the
 #   C compiler's own headers in the C toolchain `c`, from its root.
+# - `context extra_rustflags`: rustc arguments that every build of this
+#   library gives every crate it compiles for the target, after its own
+#   flags and the profile's, as a distribution's `RUSTFLAGS` follow a
+#   project's: `cargo_build`'s and `workspace`'s, those of an imported
+#   repository's definitions included. A caller sets it with `with {
+#   extra_rustflags = [...] }`, which reaches what it calls and nothing else;
+#   `-Cdebuginfo=2 -Cstrip=none` there keep the debug information a release
+#   profile with none strips. Unset, it is empty, and every crate is compiled
+#   with the arguments it had without it.
 #
 # `crates.gcsl` builds a workspace one crate at a time instead: see its
 # `workspace`.
@@ -119,6 +128,9 @@ let OPT_LIBCLANG = "/opt/libclang"
 
 # Where `cargo_build` keeps Cargo's target directory between its runs.
 let SCRATCH_TARGET = "/pekit-scratch/target"
+
+# Given to every crate compiled for the target, after the build's own flags.
+context extra_rustflags: List<String> = []
 
 def Toolchain::Rust rust_1_98() {
     let gcc = (Toolchain::C gcc_x86_64)().made()
@@ -505,6 +517,7 @@ def cargo_build(
     target: String = "x86_64-unknown-linux-musl",
     packages: List<String> = [],
     rustflags: List<String> = default_rustflags(target),
+    ^extra_rustflags,
     beside: List<{at: String, place: Dir}> = [],
     crates: List<CrateSettings> = [],
     libs: List<String> = [],
@@ -525,7 +538,7 @@ def cargo_build(
     # The flags as the build's own, which a project's configuration of its
     # target's flags overrides, as Cargo means it to: `RUSTFLAGS` would
     # override the project's.
-    let quoted_flags = (for flag in rustflags { = "\"{flag}\"" }).join(", ")
+    let quoted_flags = (for flag in [...rustflags, ...extra_rustflags] { = "\"{flag}\"" }).join(", ")
     # What a build script is given besides, and, for one that runs bindgen,
     # the libclang it loads, and the target C toolchain's own headers and
     # sysroot for it to parse with, as the toolchain's compiler would.
