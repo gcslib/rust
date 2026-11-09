@@ -44,7 +44,7 @@ with the same features, share them.
 
 - `rust_1_98`: Rust 1.98.1, each part pinned by its SHA-256, with the
   standard libraries for `x86_64-unknown-linux-gnu` and
-  `x86_64-unknown-linux-musl`, and Clippy.
+  `x86_64-unknown-linux-musl`, their source (`rust-src`), and Clippy.
 - `vendored(lock)`: every crate `lock` pins, from crates.io by its checksum
   or from a git repository by its commit, laid out as `cargo vendor` does,
   a git crate's manifest written for it to build on its own when it takes
@@ -77,7 +77,9 @@ with the same features, share them.
   outputs, such as `["target", "pekit-out", "docs/dist"]`, so that they
   don't plan the workspace again when they change. pekit lists nothing of
   a nested checkout or worktree, a directory holding a `.git` of its own.
-  Planning doesn't read `.gitignore`.
+  Planning doesn't read `.gitignore`. `cet`, on by default for an x86-64
+  glibc target, `x86_64-*-gnu`, gives its crates control-flow protection:
+  see below.
 - `bin(ws, package)`, `library(ws, package)`, `static_library(ws,
   package)`, `example(ws, package, name)`: a member's program, its shared
   library, its static archive and one of its examples that is a program,
@@ -109,7 +111,9 @@ with the same features, share them.
   workspace, built whole by Cargo in one step, by default static musl
   programs. Give `target = "x86_64-unknown-linux-gnu"` for programs linked
   against glibc; the flags and the C compiler for crates' C follow the
-  target.
+  target. It gives no control-flow protection.
+- `cet_std(rust, target)`: the standard libraries of `target`, built from
+  the toolchain `rust`'s source for control-flow protection, as a sysroot.
 - `crates(lock)` and `git_crates(lock)`: the crates a lock file pins.
 - `default_rustflags(target)`, `default_target_c(target)`,
   `builtin_headers(c)` and `cxx_of(cc)`: the flags and the C toolchain a
@@ -120,7 +124,8 @@ A member's crates are compiled with what Cargo takes from its manifest and
 its plans leave out: its `[lints]`, its `--check-cfg` flags and which of its
 targets have no test harness, which `manifests.py` reads, and link-time
 optimization worked out per crate as Cargo works it out. Its profile's
-`strip` applies as Cargo applies it.
+`strip` applies as Cargo applies it, and so do its `rustflags`, which
+Cargo's `profile-rustflags` feature allows.
 
 A build script that compiles C or C++ through the `cc` crate finds the C
 compiler in `CC_<target>`, the C++ compiler beside it in `CXX_<target>`
@@ -137,6 +142,56 @@ It needs the [gcc](https://github.com/gcslib/gcc),
 
 The comments at the top of `rust.gcsl` and `crates.gcsl` document each in
 full.
+
+## Control-flow protection
+
+`workspace` gives the crates it compiles for an x86-64 glibc target,
+`x86_64-*-gnu`, Intel's control-flow protection (CET): indirect-branch
+tracking (IBT) and shadow stacks (SHSTK). A linker marks a program with
+them only if every object it
+links is marked, and upstream's prebuilt standard libraries aren't. So the
+library builds the target's standard libraries again from the toolchain's
+`rust-src`, each crate a step, cached and shared by every workspace that
+uses the same toolchain and target:
+
+- with the features upstream's have, `backtrace` and `panic-unwind`, but
+  the C intrinsics of `compiler_builtins`, whose source `rust-src` lacks;
+- with the `dist` profile upstream builds them with, so that a crate
+  compiled with link-time optimisation finds their bitcode;
+- with `-Zcf-protection=full` and `-Zforce-unstable-if-unmarked`, against
+  an empty sysroot, so that nothing of upstream's reaches them;
+- with their sources named `/rustc/COMMIT/library`, as upstream's are.
+
+`cet_std(rust, target)` gives them as a sysroot. Every crate compiled for
+the target is then compiled against that sysroot with
+`-Zcf-protection=full`, and the C a build script compiles through the `cc`
+crate with `-fcf-protection=full`, in `CFLAGS_<target>` and
+`CXXFLAGS_<target>`. A package's `env` can set those itself.
+
+The flags are unstable, and Rust 1.98.1 is stable. rustc alone is told
+`RUSTC_BOOTSTRAP=1`, in the step that compiles a crate. Build scripts are
+told neither it nor the flags, so a build script's probe of the compiler,
+autocfg's say, finds the stable compiler it would find without CET. Build
+scripts and procedural macros run on the build's own machine and are
+compiled as before. `RUSTC_BOOTSTRAP` is unsupported upstream, so a flag's
+behaviour can change between Rust versions: check a program's
+`readelf -n` after a toolchain update.
+
+A program is marked only if the C library's own objects it links are too:
+its start files, `Scrt1.o`, `crti.o` and `crtn.o`, and
+`libc_nonshared.a`. The gcc library's Bootlin glibc isn't built with CET,
+so a program linked with `gcc_x86_64` is not marked, though every object
+Rust compiled for it is.
+
+It is on by default for an x86-64 glibc target. Give `workspace`
+`cet = false` for upstream's standard libraries and no flags. It can't be
+on for any other target: CET is x86-64's, and musl's assembly isn't
+marked, so a static musl program could never be. `cargo_build`, which builds with Cargo whole, gives no
+control-flow protection.
+
+The first build for a target compiles the standard libraries: 42 steps,
+about two and a half minutes on a 12-core machine, once per toolchain and
+target, after which the store has them.
 
 ## Building with a distribution's flags
 

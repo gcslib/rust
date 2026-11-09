@@ -24,7 +24,9 @@
 #   `RUSTFLAGS` would be, and `^extra_rustflags` after them; `crates` are
 #   settings of particular packages, a `CrateSettings` each; `libclang` a
 #   directory holding the `libclang.so` build scripts' bindgen loads, as
-#   `cargo_build` has it.
+#   `cargo_build` has it. With `cet`, by default for an x86-64 glibc
+#   target, `x86_64-*-gnu`, the crates built for the target have Intel's
+#   control-flow protection, CET: see below.
 # - `CrateSettings`: what a package needs that its manifest does not say:
 #   `data`, files and directories its compiles and its build script read
 #   besides its own directory, each placed at `at` under the workspace, as
@@ -87,7 +89,38 @@
 # A member's crates are compiled with what Cargo takes from its manifest
 # that its plans omit, as `manifests.py` reads it with the python library's
 # pinned Python: its `[lints]`, or its workspace's, its `--check-cfg`
-# flags, and which of its targets have no test harness.
+# flags, and which of its targets have no test harness. A profile's
+# `rustflags`, as Cargo's `profile-rustflags` gives them, come after the
+# workspace's.
+#
+# Control-flow protection. A linker marks a program with indirect-branch
+# tracking (IBT) and shadow stacks (SHSTK) only if every object it links is
+# marked, and upstream's prebuilt standard libraries are not. So a
+# workspace with `cet` builds its target's standard libraries again, `core`,
+# `alloc`, `std`, `test`, `proc_macro` and what they depend on, from the
+# toolchain's `source`, each a step as a member's crates are: with the
+# features upstream's have but its C intrinsics, `backtrace` and
+# `panic-unwind`; with its `dist` profile, as upstream builds them, so that
+# a crate compiled with link-time optimisation finds their bitcode; with
+# `-Zcf-protection=full` and `-Zforce-unstable-if-unmarked`, as upstream's
+# build gives every one of them, against an empty sysroot, so that nothing of
+# upstream's reaches them; and with their sources named as upstream's are,
+# `/rustc/COMMIT/library`, so that no path of the step's is in them.
+# `cet_std(rust, target)` gives them as a sysroot. Every crate compiled for
+# the target is then compiled against that sysroot, with
+# `-Zcf-protection=full`, and the C its build script compiles through
+# `cc` with `-fcf-protection=full`, in `CFLAGS_<target>` and
+# `CXXFLAGS_<target>`, which a crate's `env` can override. The flags are
+# unstable: rustc alone is told `RUSTC_BOOTSTRAP=1`, in its step's
+# environment, and build scripts are told neither, so that a script's probe
+# of the compiler finds the stable compiler it would without `cet`. Build
+# scripts and procedural macros, which run on the build's own machine, are
+# compiled as before. A program is marked only if the C library's own
+# objects it links are too.
+#
+# `cet` is on by default for an x86-64 glibc target, `x86_64-*-gnu`, and
+# can't be on for any other: CET is x86-64's, and musl's assembly is not
+# marked, so a static musl program could never be.
 #
 # Each step's sandbox holds the toolchain, the crate's own directory, at its
 # path in the workspace or among the vendored crates, and what it is given,
@@ -158,6 +191,29 @@ let OUT = "/work/out"
 # macros are built for.
 let HOST = "x86_64-unknown-linux-gnu"
 
+# Where a compile for the target has the sysroot it is compiled against, if
+# not the toolchain's own: the standard libraries built for control-flow
+# protection, or none, for those standard libraries themselves.
+let OPT_SYSROOT = "/opt/sysroot"
+
+# What rustc and a C compiler are given for control-flow protection.
+let CET_RUSTFLAGS = ["-Zcf-protection=full"]
+
+let CET_CFLAGS = "-fcf-protection=full"
+
+# The standard libraries' package that depends on every one a sysroot
+# holds, and the features upstream's are built with, but its C intrinsics,
+# whose source `rust-src` lacks.
+let SYSROOT_PACKAGE = "sysroot"
+
+let STD_FEATURES = ["backtrace"]
+
+# The directories of the standard libraries' workspace that planning needs
+# none of: the vendored crates, which are given as such; its Cargo
+# configuration, which names them in place; and those that crates take
+# by `#[path]`, which are given to them alone (see `std_settings`).
+let STD_IGNORED = [".cargo", "vendor", "stdarch", "portable-simd", "backtrace"]
+
 # The keys of a build script's directives that are no metadata.
 let RESERVED = ["rerun-if-changed", "rerun-if-env-changed", "warning", "error", "rustc-check-cfg"]
 
@@ -208,6 +264,7 @@ type UnitProfile = {
     lto: String = "false",
     codegen_units: Int = 0,
     strip: UnitStrip = {},
+    rustflags: List<String> = [],
 }
 
 type UnitDep = {index: Int, extern_crate_name: String}
@@ -242,6 +299,10 @@ type Skeleton = {manifests: List<{at: String, place: File}>, paths: List<String>
 # `release`.
 type ProfileRoot = {name: String, root: String}
 
+# A planned workspace. Of each crate compiled for its target: `cet`,
+# whether it has control-flow protection; `codegen`, what rustc is told of
+# it besides, unstable, as `RUSTC_BOOTSTRAP=1` lets it be; and `sysroot`,
+# the sysroot it is compiled against, if not the toolchain's own.
 type RustWorkspace = {
     src: Dir,
     vendor: Vendored,
@@ -251,6 +312,9 @@ type RustWorkspace = {
     whole: Bool,
     profiles: List<ProfileRoot>,
     rustflags: List<String>,
+    cet: Bool,
+    codegen: List<String>,
+    sysroot: List<Dir>,
     crates: List<CrateSettings>,
     libclang: List<Dir>,
     rust: RustToolchain,
@@ -272,6 +336,7 @@ def workspace(
     whole: Bool = false,
     rustflags: List<String> = [],
     ^extra_rustflags,
+    cet: Bool = cet_target(target),
     crates: List<CrateSettings> = [],
     libclang: List<Dir> = [],
     ignore: List<String> = ["target", "pekit-out"],
@@ -279,7 +344,51 @@ def workspace(
     target_c: toolchain.CToolchain = default_target_c(target),
     python: PythonToolchain = pinned_python(),
 ) ->> RustWorkspace {
-    let flags = [...rustflags, ...extra_rustflags]
+    if cet and not cet_target(target) {
+        panic("`cet` is for an x86-64 glibc target, `x86_64-*-gnu`, and `{target}` is none: CET is x86-64's, and musl's own objects aren't marked")
+    }
+    let sysroot: List<Dir> = if cet { [cet_std(rust, target)] } else { [] }
+    = planned_workspace(
+        src,
+        vendor,
+        target,
+        profile,
+        profile_env,
+        whole,
+        [...rustflags, ...extra_rustflags],
+        cet,
+        [],
+        sysroot,
+        crates,
+        libclang,
+        ignore,
+        rust,
+        target_c,
+        python,
+    )
+}
+
+# The workspace `workspace` plans, with `flags` its rustflags and the
+# extra flags after them, `cet`, `codegen` and `sysroot` as a
+# `RustWorkspace` has them.
+fn planned_workspace(
+    src: Dir,
+    vendor: Vendored,
+    target: String,
+    profile: String,
+    profile_env: List<Entry<String>>,
+    whole: Bool,
+    flags: List<String>,
+    cet: Bool,
+    codegen: List<String>,
+    sysroot: List<Dir>,
+    crates: List<CrateSettings>,
+    libclang: List<Dir>,
+    ignore: List<String>,
+    rust: RustToolchain,
+    target_c: toolchain.CToolchain,
+    python: PythonToolchain,
+) ->> RustWorkspace {
     for each in profile_env {
         if not each.key.starts_with("CARGO_PROFILE_") {
             panic("`profile_env` sets `{each.key}`, which is no `CARGO_PROFILE_` variable")
@@ -301,6 +410,9 @@ def workspace(
         whole = whole
         profiles = read.profiles
         rustflags = flags
+        cet = cet
+        codegen = codegen
+        sysroot = sysroot
         crates = crates
         libclang = libclang
         rust = rust
@@ -312,6 +424,93 @@ def workspace(
         host_cfg = rustc_cfg(rust, HOST)
         clippy_config = for name in ["clippy.toml", ".clippy.toml"] if fs.exists("{src.path}/{name}") { = src.file(name) }
     }
+}
+
+# Whether `target` can have control-flow protection: an x86-64 glibc
+# target.
+fn cet_target(target: String) -> Bool {
+    = target.starts_with("x86_64-") and target.ends_with("-gnu")
+}
+
+# The standard libraries of `target`, built from `rust`'s `source` for
+# control-flow protection, as a sysroot: each library at
+# `lib/rustlib/TARGET/lib`, as rustc finds it in its own.
+def cet_std(rust: RustToolchain, target: String) ->> Dir {
+    let library = rust.source.dir("rust-src/lib/rustlib/src/rust/library")
+    let commit = rust.source.file("git-commit-hash").read().trim()
+    # Its crates of crates.io, vendored with their checksums; `locals` are
+    # `cargo_build`'s alone.
+    let vendor: Vendored = {crates = library.dir("vendor"); git = []; locals = []}
+    # Upstream's own flags for its standard libraries: none of upstream's
+    # sysroot, crates that aren't marked stable unstable, and paths that
+    # name upstream's sources.
+    let at = "/rustc/{commit}/library"
+    let codegen = [
+        "-Zforce-unstable-if-unmarked",
+        "--remap-path-prefix={SRC}={at}",
+        "--remap-path-prefix={VENDOR}={at}/vendor",
+    ]
+    let ws = planned_workspace(
+        library,
+        vendor,
+        target,
+        "dist",
+        [],
+        false,
+        [],
+        true,
+        codegen,
+        [empty_dir()],
+        std_settings(library),
+        [],
+        STD_IGNORED,
+        rust,
+        default_target_c(target),
+        pinned_python(),
+    )
+    let graph = planned(ws, SYSROOT_PACKAGE, "build", STD_FEATURES)
+    # Every library built for the target but the empty one that depends on
+    # them all.
+    let libraries = for i in 0..len(graph.units) if graph.units[i].mode == "build" and graph.units[i].platform != "" and graph.units[i].target.name != SYSROOT_PACKAGE {
+        = i
+    }
+    let made = built(ws, graph, libraries)
+    let mut entries: List<{at: String, place: File}> = []
+    for i in libraries {
+        for name in made[i].files {
+            entries := [...entries, {at = "lib/rustlib/{target}/lib/{name}"; place = made[i].dir.file(name)}]
+        }
+    }
+    = sysroot_of(entries)
+}
+
+# What of the standard libraries' workspace `library` its crates read
+# outside their own directories, by `#[path]` and `include_str!`.
+fn std_settings(library: Dir) -> List<CrateSettings> {
+    let given = fn(names: List<String>) -> List<{at: String, place: Dir | File}> {
+        = for name in names { = {at = name; place = library.dir(name)} }
+    }
+    = [
+        {package = "core"; data = given(["stdarch", "portable-simd"])},
+        {package = "std"; data = given(["backtrace", "core", "portable-simd", "stdarch"])},
+        {package = "compiler_builtins"; data = given(["compiler-builtins/libm"])},
+    ]
+}
+
+# A sysroot of `entries`.
+#[hermetic]
+fn sysroot_of(entries: List<{at: String, place: File}>) -> Dir {
+    let placed: List<{at: String, place: Dir | File | FileSet}> = for each in entries { = {at = each.at; place = each.place} }
+    = fs.compose(placed)
+}
+
+# An empty directory: the sysroot the standard libraries are compiled
+# against.
+#[hermetic]
+fn empty_dir() -> Dir {
+    let at = "{working_dir().path}/empty"
+    let made = fs.mkdir(at)
+    = dir(at)
 }
 
 # The python library's pinned Python, which reads the manifests.
@@ -554,13 +753,14 @@ type Built = {
 }
 
 # What a compile is given: the arguments known before its dependencies are
-# built, its environment and working directory, what its sandbox holds
-# besides the toolchain, and, once built, the libraries it is given by
-# name, the libraries they need, its own build script's run, if it has one,
-# the runs of the build scripts of the crates it needs, and which of its own
-# build script's link arguments apply to it.
+# built, whether they are unstable, its environment and working directory,
+# what its sandbox holds besides the toolchain, and, once built, the
+# libraries it is given by name, the libraries they need, its own build
+# script's run, if it has one, the runs of the build scripts of the crates it
+# needs, and which of its own build script's link arguments apply to it.
 type CompileSpec = {
     args: List<String>,
+    unstable: Bool,
     env: List<Entry<String>>,
     cwd: String,
     placed: List<{at: String, place: Dir | File}>,
@@ -855,7 +1055,8 @@ fn member_id(ws: RustWorkspace, package: String) -> String {
 # Cargo has it test them: given what its compile would be, but no profile
 # but its link-time optimisation, as Cargo gives rustdoc the doctests' (so
 # that libraries compiled to bitcode alone for them link), no native
-# libraries and no link arguments of its own.
+# libraries, no link arguments of its own and none of its unstable flags,
+# but the sysroot it is compiled against.
 fn doctest_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) -> CompileSpec {
     let unit = graph.units[at.index]
     let target = unit.target
@@ -874,10 +1075,11 @@ fn doctest_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         ...(for each in unit.features { = "--cfg=feature=\"{each}\"" }),
         ...facts.check_cfg,
         "-Clinker={OPT_CC}/{ws.rust.cc.path.strip_prefix(ws.rust.cc_root.path).strip_prefix("/")}",
-        ...(if unit.platform == "" { none } else { ["--target={ws.target}"] }),
+        ...(if unit.platform == "" { none } else { ["--target={ws.target}", ...sysroot_args(ws)] }),
     ]
     = {
         args = args
+        unstable = false
         env = compiled.env
         cwd = compiled.cwd
         placed = compiled.placed
@@ -891,8 +1093,9 @@ fn doctest_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
 
 # How rustdoc documents the library that the unit `at` of `graph` builds,
 # those it depends on built as `made` has them, as Cargo has it document
-# it: given what its compile would be, but no profile, no native libraries
-# and no link arguments of its own, and told the package's version.
+# it: given what its compile would be, but no profile, no native
+# libraries, no link arguments of its own and none of its unstable flags,
+# but the sysroot it is compiled against, and told the package's version.
 fn doc_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) -> CompileSpec {
     let unit = graph.units[at.index]
     let target = unit.target
@@ -908,10 +1111,11 @@ fn doc_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) ->
         ...(for each in unit.features { = "--cfg=feature=\"{each}\"" }),
         ...facts.check_cfg,
         "--crate-version={at.package.version}",
-        ...(if unit.platform == "" { none } else { ["--target={ws.target}"] }),
+        ...(if unit.platform == "" { none } else { ["--target={ws.target}", ...sysroot_args(ws)] }),
     ]
     = {
         args = args
+        unstable = false
         env = compiled.env
         cwd = compiled.cwd
         placed = compiled.placed
@@ -1114,6 +1318,13 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     let source = if member { target.src_path.strip_prefix("{SRC}/") } else { target.src_path }
     let features = for each in unit.features { = "--cfg=feature=\"{each}\"" }
     let none: List<String> = []
+    # A crate for the target with control-flow protection, and the standard
+    # libraries' own flags, against its sysroot.
+    let codegen: List<String> = if host {
+        none
+    } else {
+        [...(if ws.cet { CET_RUSTFLAGS } else { none }), ...ws.codegen, ...sysroot_args(ws)]
+    }
     let args = [
         "--crate-name={crate}",
         "--edition={target.edition}",
@@ -1127,9 +1338,12 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         "-Cmetadata={unit.pkg_id} {unit.mode} {target.name} {unit.platform} {unit.features.join(",")}",
         "-Clinker={OPT_CC}/{ws.rust.cc.path.strip_prefix(ws.rust.cc_root.path).strip_prefix("/")}",
         ...(if host { none } else { ["--target={ws.target}", ...ws.rustflags] }),
+        ...unit.profile.rustflags,
+        ...codegen,
         ...(if member { none } else { ["--cap-lints=allow"] }),
         ...(if target.crate_types.contains("proc-macro") { ["--extern=proc_macro"] } else { none }),
     ]
+    let sysroot: List<{at: String, place: Dir | File}> = if host { [] } else { for each in ws.sysroot { = {at = OPT_SYSROOT; place = each} } }
     let link = if kind == "bin" and target.kind.contains("example") {
         "examples"
     } else if kind == "bin" {
@@ -1143,9 +1357,10 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     }
     let spec: CompileSpec = {
         args = args
+        unstable = len(codegen) > 0 or len(unit.profile.rustflags) > 0
         env = [...crate_env(ws, at.package, unit, crate), ...bin_exes(graph, unit), ...at.settings.env]
         cwd = SRC
-        placed = [...at.placed, ...at.given]
+        placed = [...at.placed, ...at.given, ...sysroot]
         externs = externs
         libraries = for each in libraries { = made[each].dir }
         out = out
@@ -1153,6 +1368,12 @@ fn compile_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         link = link
     }
     = {kind = kind; files = files; libraries = libraries; runs = runs; spec = spec}
+}
+
+# What rustc and rustdoc are told of the sysroot of `ws`'s crates for the
+# target: none if they have the toolchain's own.
+fn sysroot_args(ws: RustWorkspace) -> List<String> {
+    = for each in ws.sysroot { = "--sysroot={OPT_SYSROOT}" }
 }
 
 # What Cargo tells a test program of its package when it runs it, as it
@@ -1450,6 +1671,13 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     let target_cc = "{OPT_TARGET_CC}/{ws.target_c.cc.path.strip_prefix(ws.target_c.root.path).strip_prefix("/")}"
     let target_ar = "{OPT_TARGET_CC}/{ws.target_c.ar.path.strip_prefix(ws.target_c.root.path).strip_prefix("/")}"
     let cc = "{OPT_CC}/{ws.rust.cc.path.strip_prefix(ws.rust.cc_root.path).strip_prefix("/")}"
+    # The C of a crate for the target with control-flow protection, which
+    # `cc` takes before `CFLAGS`.
+    let cet_c: List<Entry<String>> = if ws.cet and not host {
+        [{key = "CFLAGS_{target_var}"; value = CET_CFLAGS}, {key = "CXXFLAGS_{target_var}"; value = CET_CFLAGS}]
+    } else {
+        []
+    }
     let mut env = [
         ...crate_env(ws, at.package, unit, "build_script_build"),
         {key = "OUT_DIR"; value = OUT},
@@ -1468,6 +1696,7 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         {key = "CXX_{target_var}"; value = cxx_of(if host { cc } else { target_cc })},
         {key = "AR_{target_var}"; value = if host { "{OPT_CC}/bin/{ar_of(cc)}" } else { target_ar }},
         ...(for each in unit.features { = {key = "CARGO_FEATURE_{upper(each.split("-").join("_"))}"; value = "1"} }),
+        ...cet_c,
         ...at.settings.env,
     ]
     if len(ws.libclang) > 0 {
@@ -1710,16 +1939,18 @@ fn documented(rust: RustToolchain, spec: CompileSpec, flags: List<String>) -> Di
 
 # What the compile `spec` says is given in its step: its arguments, with
 # what it links and searches, and what its build script said; its
-# environment; and what its sandbox holds. Without `linking`, rustdoc's
-# tests are given no native libraries or link arguments of their own, as
-# Cargo gives them none.
+# environment, with `RUSTC_BOOTSTRAP=1` if its arguments are unstable; and
+# what its sandbox holds. Without `linking`, rustdoc's tests are given no
+# native libraries or link arguments of their own, as Cargo gives them
+# none.
 fn given_of(rust: RustToolchain, spec: CompileSpec, linking: Bool) -> {
     args: List<String>,
     env: List<Entry<String>>,
     placed: List<{at: String, place: Dir | File | FileSet}>,
 } {
     let mut args = spec.args
-    let mut env = spec.env
+    let unstable: List<Entry<String>> = if spec.unstable { [{key = "RUSTC_BOOTSTRAP"; value = "1"}] } else { [] }
+    let mut env = [...spec.env, ...unstable]
     for each in spec.externs {
         args := [...args, "--extern={each.name}={each.dir.path}/{each.file}"]
     }
