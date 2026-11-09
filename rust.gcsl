@@ -5,13 +5,22 @@
 #   Cargo and the standard libraries of its targets, laid out as one
 #   install; `runtime`, a root they run on; `cc`, the C compiler that links
 #   what rustc compiles, and `cc_root`, its install; `clippy`, Clippy's
-#   component, whose `bin/clippy-driver` runs with `root`'s libraries.
+#   component, whose `bin/clippy-driver` runs with `root`'s libraries; and
+#   `source`, its `rust-src` component as its archive has it: the source of
+#   its standard libraries, the Cargo workspace
+#   `rust-src/lib/rustlib/src/rust/library`, with the crates they depend on
+#   vendored in its `vendor`, and `git-commit-hash`, the commit of
+#   rust-lang/rust it was built from, by which its prebuilt standard
+#   libraries name their sources, `/rustc/COMMIT/library`. `crates.gcsl`'s
+#   `workspace` builds the standard libraries again from their source for
+#   control-flow protection.
 # - `rust_1_98`: Rust 1.98.1 from static.rust-lang.org, each part pinned by
 #   its SHA-256, with the standard libraries of `x86_64-unknown-linux-gnu`
-#   and `x86_64-unknown-linux-musl`, running on the gcc library's Bootlin
-#   sysroot and linking with its compiler. rustc needs zlib, which the
-#   sysroot lacks: zlib, from its pinned source, is built with the buildenv
-#   library's pinned environment and put beside rustc's own libraries.
+#   and `x86_64-unknown-linux-musl` and their source, running on the gcc
+#   library's Bootlin sysroot and linking with its compiler. rustc needs
+#   zlib, which the sysroot lacks: zlib, from its pinned source, is built
+#   with the buildenv library's pinned environment and put beside rustc's
+#   own libraries.
 # - `Crate`: a crate of crates.io, as `Cargo.lock` pins it: its name,
 #   version and checksum, the SHA-256 of its `.crate` file.
 # - `GitCrate`: a crate of a git repository, as `Cargo.lock` pins it: its
@@ -71,6 +80,8 @@
 #   file put back as it was can make older than its last build, so each
 #   package of `vendor.locals` is cleaned first and always compiled again.
 #   A crate of `vendor`, by its name, version and source, never changes.
+#   It gives no control-flow protection, which `crates.gcsl`'s `workspace`
+#   gives a glibc target's crates.
 # - `cargo_sources(vendor)`: the sections of Cargo's configuration that
 #   make it take every crate from `vendor`, as `cargo vendor` prints them.
 # - `default_rustflags(target)`, `default_target_c(target)`: the flags and
@@ -102,7 +113,7 @@ import PythonToolchain from "github.com/gcslib/python"
 import * from "github.com/gcslib/gcc"
 import * from "github.com/gcslib/buildenv"
 
-type RustToolchain = {root: Dir, runtime: Dir, cc: File, cc_root: Dir, clippy: Dir}
+type RustToolchain = {root: Dir, runtime: Dir, cc: File, cc_root: Dir, clippy: Dir, source: Dir}
 
 enum Toolchain::Rust<RustToolchain>
 
@@ -170,7 +181,15 @@ def Toolchain::Rust rust_1_98() {
             "clippy-preview",
             "e167f333be24e1d5eea56ea563c7def0aa0bd613f5ce3445976c93b0288799d1",
         )
+        source = source_part("5c846ebcebcc7e2e0777a4cdaa12051691593f16a7e94edbae5e6241cc62d98c")
     }
+}
+
+# The `rust-src` component of Rust 1.98.1, the source of its standard
+# libraries, its archive pinned by `sha256`, unpacked.
+fn source_part(sha256: String) -> Dir {
+    let archive = fetch("{DIST}/rust-src-1.98.1.tar.xz", sha256 = sha256)
+    = unpack(archive).dir("rust-src-1.98.1")
 }
 
 # The component `component` of the part `name` of Rust 1.98.1, for
