@@ -53,7 +53,16 @@ with the same features, share them.
   (`libraries.pinned_libraries`), or the build fails saying which to update:
   the crates and the settings the library gives them are of one commit.
 - `workspace(src, vendor)`: a Cargo workspace, planned by Cargo for
-  `target`, by default `x86_64-unknown-linux-gnu`. Give `crates` the
+  `target`, by default `x86_64-unknown-linux-gnu`, and `profile`, by
+  default `release`. `profile = "dev"` builds as `cargo build` does, and
+  tests with the `test` profile, as `cargo test` does; any other profile,
+  `quick` say, as `--profile` does. Build scripts are told `PROFILE` as
+  Cargo tells them: `release` for a profile that inherits from `release`,
+  `debug` otherwise. `profile_env` sets `CARGO_PROFILE_` variables for
+  Cargo as it plans, `CARGO_PROFILE_DEV_DEBUG = "line-tables-only"` say.
+  With `whole = true`, every crate has the features Cargo resolves for the
+  whole workspace, as `cargo test --workspace` gives them, not those of
+  the member alone. Give `crates` the
   settings of packages that need more than their manifests say: files
   under the workspace that they read (`data`), files placed relative to a
   package's own directory (`beside`), environment variables (`env`), and
@@ -75,9 +84,14 @@ with the same features, share them.
   with `features` if given.
 - `tests(ws, package)`: a member's test programs, with `features` if
   given, each integration test with the package's programs that
-  `CARGO_BIN_EXE_<name>` names; `run_test(test)` runs one from its
-  package's directory, as Cargo does, with the package there, those programs
-  where it was told, and `args` if given.
+  `CARGO_BIN_EXE_<name>` names, and the package's examples, which `cargo
+  test` builds too; `benches(ws, package)`: its benchmarks, as `cargo test
+  --benches` builds them; `run_test(test)` runs one from its package's
+  directory, as Cargo does, with the package there, those programs where it
+  was told, and `args` if given. The test program is at `/work/deps/<name>`
+  and the examples at `/work/examples/<name>`, so that a test that looks
+  for an example at `../../examples` from its own path, as in Cargo's
+  target directory, finds it.
 - `doctests(ws, package)`: a member's documentation tests, run by rustdoc
   as `cargo test --doc` runs them, each crate's a step.
 - `clippy(ws, package)`: Clippy's checks of a member, as `cargo clippy

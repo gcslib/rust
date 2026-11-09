@@ -5,10 +5,17 @@
 #
 # - `workspace(src, vendor)`: the Cargo workspace `src`, its crates from
 #   `vendor`, as `vendored` gives them, planned for `target`, by default
-#   `x86_64-unknown-linux-gnu`: a `RustWorkspace`. Cargo plans it: what each
-#   member's build and tests are, unit by unit, as `cargo build --unit-graph`
-#   says, each crate with the features Cargo resolves for that member alone,
-#   so that a member's features never reach another's crates. Planning reads
+#   `x86_64-unknown-linux-gnu`, and the profile `profile`, by default
+#   `release`: a `RustWorkspace`. Cargo plans it: what each member's build
+#   and tests are, unit by unit, as `cargo build --unit-graph` says, each
+#   crate with the features Cargo resolves for that member alone, so that a
+#   member's features never reach another's crates, or, if `whole`, for the
+#   whole workspace, as `cargo build --workspace` and `cargo test
+#   --workspace` resolve them. A profile is chosen as Cargo chooses it:
+#   `dev` as `cargo build` does, its tests with `test`, `release` as
+#   `--release` does, and any other as `--profile` does; `profile_env`,
+#   `CARGO_PROFILE_` variables, are set for Cargo as it plans, as the
+#   environment Cargo runs in would set them. Planning reads
 #   the manifests, the lock and which files there are, never what the
 #   sources say, so a change to a source plans nothing again; it reads none
 #   under a hidden directory or one of `ignore`, paths relative to `src`, a
@@ -41,14 +48,19 @@
 #   unit tests and each integration test, with `features` too if given, as
 #   `cargo test --features` builds them: a `RustTest` each, by its name,
 #   with the package's programs an integration test runs, which
-#   `CARGO_BIN_EXE_<name>` names, as Cargo builds and names them;
-#   `run_test(test)` runs one, a step, in a sandbox of the toolchain's
+#   `CARGO_BIN_EXE_<name>` names, as Cargo builds and names them, and its
+#   examples, which `cargo test` builds with them; `benches(ws, package)`:
+#   its benchmarks, as `cargo test --benches` builds them, a `RustTest`
+#   each; `run_test(test)` runs one, a step, in a sandbox of the toolchain's
 #   runtime with a writable `/tmp`, from its package's directory, which it
 #   holds, with the package's `data` and `beside`, as Cargo runs a test,
 #   told of its package as Cargo tells a test it runs, `CARGO_MANIFEST_DIR`
-#   and `CARGO_PKG_VERSION` say, those programs where it was told, `given`
-#   placed at their paths, `env` set and `args` its arguments, and fails if
-#   it does. What is given at a path the package has is not placed twice.
+#   and `CARGO_PKG_VERSION` say, those programs where it was told, the
+#   test program at `/work/deps/<name>` and the examples beside it in
+#   `/work/examples`, where a test finds them from its own path as in
+#   Cargo's target directory, `given` placed at their paths, `env` set and
+#   `args` its arguments, and fails if it does. What is given at a path the
+#   package has is not placed twice.
 # - `doctests(ws, package)`: the tests of the member `package`'s
 #   documentation, each crate's run by rustdoc as a step, as `cargo test
 #   --doc` runs them, with `given` and `env` as `run_test` has them; none
@@ -105,6 +117,14 @@ let OPT_LIBCLANG = "/opt/libclang"
 # Where an integration test has its package's programs, which
 # `CARGO_BIN_EXE_<name>` names, as Cargo has them in its target directory.
 let BIN_EXE = "/work/bin"
+
+# Where a test program runs from, and where its package's examples are
+# beside it, as in Cargo's target directory, `deps` and `examples`, so that
+# a test that finds an example from its own path, `../../examples`, finds
+# it.
+let TEST_DIR = "/work/deps"
+
+let EXAMPLES = "/work/examples"
 
 # Where a Clippy check's sandbox has the workspace's Clippy configuration.
 let OPT_CLIPPY_CONF = "/opt/clippy"
@@ -179,6 +199,7 @@ type StripLevel = String | {Named: String}
 type UnitStrip = {resolved: StripLevel = "None", deferred: StripLevel = "None"}
 
 type UnitProfile = {
+    name: String = "",
     opt_level: String,
     debuginfo: Int | String = 0,
     debug_assertions: Bool,
@@ -217,10 +238,18 @@ type PackageFacts = {
 # at its path, and the path of every other file, which it is given empty.
 type Skeleton = {manifests: List<{at: String, place: File}>, paths: List<String>}
 
+# A profile and the profile at the root of its chain of `inherits`, `dev` or
+# `release`.
+type ProfileRoot = {name: String, root: String}
+
 type RustWorkspace = {
     src: Dir,
     vendor: Vendored,
     target: String,
+    profile: String,
+    profile_env: List<Entry<String>>,
+    whole: Bool,
+    profiles: List<ProfileRoot>,
     rustflags: List<String>,
     crates: List<CrateSettings>,
     libclang: List<Dir>,
@@ -238,6 +267,9 @@ def workspace(
     src: Dir,
     vendor: Vendored,
     target: String = "x86_64-unknown-linux-gnu",
+    profile: String = "release",
+    profile_env: List<Entry<String>> = [],
+    whole: Bool = false,
     rustflags: List<String> = [],
     ^extra_rustflags,
     crates: List<CrateSettings> = [],
@@ -248,14 +280,26 @@ def workspace(
     python: PythonToolchain = pinned_python(),
 ) ->> RustWorkspace {
     let flags = [...rustflags, ...extra_rustflags]
+    for each in profile_env {
+        if not each.key.starts_with("CARGO_PROFILE_") {
+            panic("`profile_env` sets `{each.key}`, which is no `CARGO_PROFILE_` variable")
+        }
+    }
     let skeleton = skeleton_of(src, ignore)
     let described = cargo_metadata(rust, skeleton, vendor, target)
     let metadata: Metadata = json.decode(described.read())
-    let facts: List<PackageFacts> = json.decode(manifest_facts(python, skeleton, described, file("manifests.py")).read())
+    let read: {packages: List<PackageFacts>, profiles: List<ProfileRoot>} = json.decode(manifest_facts(python, skeleton, described, file("manifests.py")).read())
+    if not (for each in read.profiles { = each.name }).contains(profile) {
+        panic("the workspace has no profile `{profile}`")
+    }
     = {
         src = src
         vendor = vendor
         target = target
+        profile = profile
+        profile_env = profile_env
+        whole = whole
+        profiles = read.profiles
         rustflags = flags
         crates = crates
         libclang = libclang
@@ -263,7 +307,7 @@ def workspace(
         target_c = target_c
         skeleton = skeleton
         metadata = metadata
-        facts = facts
+        facts = read.packages
         target_cfg = rustc_cfg(rust, target, flags)
         host_cfg = rustc_cfg(rust, HOST)
         clippy_config = for name in ["clippy.toml", ".clippy.toml"] if fs.exists("{src.path}/{name}") { = src.file(name) }
@@ -329,13 +373,14 @@ fn is_manifest(at: String) -> Bool {
 
 # A sandbox of the toolchain, the skeleton of a workspace at `/work/src`
 # and its vendored crates, in which Cargo plans a build for `target`, with
-# `besides` placed too.
+# `besides` placed too and `env` set besides its own.
 fn planned_in(
     rust: RustToolchain,
     skeleton: Skeleton,
     vendor: Vendored,
     target: String,
     besides: List<{at: String, place: Dir | File | FileSet}> = [],
+    env: List<Entry<String>> = [],
 ) -> Sandbox {
     let home = working_dir().path
     let empty = "{home}/empty"
@@ -356,13 +401,14 @@ fn planned_in(
     ]
     = fs.compose(placed).sandbox(
         cwd = SRC,
-        env = {
-            PATH = "{OPT_RUST}/bin:{OPT_CC}/bin"
-            HOME = "/work/home"
-            CARGO_HOME = "/work/home"
-            CARGO_TARGET_DIR = "/work/target"
-            RUSTC_BOOTSTRAP = "1"
-        },
+        env = environment([
+            {key = "PATH"; value = "{OPT_RUST}/bin:{OPT_CC}/bin"},
+            {key = "HOME"; value = "/work/home"},
+            {key = "CARGO_HOME"; value = "/work/home"},
+            {key = "CARGO_TARGET_DIR"; value = "/work/target"},
+            {key = "RUSTC_BOOTSTRAP"; value = "1"},
+            ...env,
+        ]),
     )
 }
 
@@ -407,10 +453,12 @@ fn manifest_facts(python: PythonToolchain, skeleton: Skeleton, metadata: File, r
     = box.file("/work/facts.json")
 }
 
-# The units of the member `package`'s plan for `target`, as `cargo
-# --unit-graph` makes it: of its build if `mode` is `build`, of its tests if
-# `test`, of every target `cargo clippy --all-targets` checks if `clippy`,
-# and of its documentation's tests if `doc`.
+# The units of the member `package`'s plan for `target`, or of every
+# member's if `package` is empty, as `cargo --unit-graph` makes it: of its
+# build if `mode` is `build`, of its tests and examples if `test`, of its
+# benchmarks if `benches`, of every target `cargo clippy --all-targets`
+# checks if `clippy`, and of its documentation's tests if `doc`; for the
+# profile `profile`, with `profile_env` set.
 #[hermetic]
 fn unit_graph(
     rust: RustToolchain,
@@ -420,10 +468,14 @@ fn unit_graph(
     package: String,
     mode: String,
     features: List<String>,
+    profile: String,
+    profile_env: List<Entry<String>>,
 ) -> File {
-    let box = planned_in(rust, skeleton, vendor, target)
+    let box = planned_in(rust, skeleton, vendor, target, env = profile_env)
     let how = if mode == "test" {
         ["test", "--no-run"]
+    } else if mode == "benches" {
+        ["test", "--no-run", "--benches"]
     } else if mode == "clippy" {
         ["test", "--no-run", "--all-targets"]
     } else if mode == "doc" {
@@ -434,19 +486,22 @@ fn unit_graph(
         ["build"]
     }
     let chosen: List<String> = if len(features) > 0 { ["--features", features.join(",")] } else { [] }
+    # `dev` is Cargo's own choice, which tests take `test` for, as `release`
+    # is with `--release`, `bench` for benchmarks.
+    let profiled: List<String> = if profile == "release" { ["--release"] } else if profile == "dev" { [] } else { ["--profile", profile] }
+    let packages = if package == "" { ["--workspace"] } else { ["-p", package] }
     let ran = box.exec(
         "{OPT_RUST}/bin/cargo",
         ...how,
         "--unit-graph",
         "-Z",
         "unstable-options",
-        "--release",
+        ...profiled,
         "--frozen",
         "--offline",
         "--target",
         target,
-        "-p",
-        package,
+        ...packages,
         ...chosen,
     )
     let at = "{working_dir().path}/{mode}.json"
@@ -541,6 +596,7 @@ type RustTest = {
     at: String,
     placed: List<{at: String, place: Dir | File}> = [],
     programs: List<{at: String, place: File}> = [],
+    examples: List<{at: String, place: File}> = [],
     env: List<Entry<String>> = [],
 }
 
@@ -557,10 +613,11 @@ type UnitAt = {
 
 def bin(ws: RustWorkspace, package: String, name: String = package, features: List<String> = []) -> File {
     let graph = planned(ws, package, "build", features)
+    let id = member_id(ws, package)
     let mut root = -1
     for i in 0..len(graph.units) {
         let unit = graph.units[i]
-        if unit.mode == "build" and unit.target.kind.contains("bin") and unit.target.name == name {
+        if unit.pkg_id == id and unit.mode == "build" and unit.target.kind.contains("bin") and unit.target.name == name {
             root := i
         }
     }
@@ -573,10 +630,11 @@ def bin(ws: RustWorkspace, package: String, name: String = package, features: Li
 
 def example(ws: RustWorkspace, package: String, name: String, features: List<String> = []) -> File {
     let graph = planned(ws, package, "examples", features)
+    let id = member_id(ws, package)
     let mut root = -1
     for i in 0..len(graph.units) {
         let unit = graph.units[i]
-        if unit.mode == "build" and unit.target.kind.contains("example") and unit.target.name == name {
+        if unit.pkg_id == id and unit.mode == "build" and unit.target.kind.contains("example") and unit.target.name == name {
             root := i
         }
     }
@@ -600,9 +658,10 @@ def static_library(ws: RustWorkspace, package: String, features: List<String> = 
 # manifest names, as Cargo does.
 fn linked(ws: RustWorkspace, package: String, kind: String, suffix: String, features: List<String>) -> File {
     let graph = planned(ws, package, "build", features)
+    let id = member_id(ws, package)
     let mut root = -1
     for i in 0..len(graph.units) {
-        if graph.units[i].mode == "build" and graph.units[i].target.crate_types.contains(kind) {
+        if graph.units[i].pkg_id == id and graph.units[i].mode == "build" and graph.units[i].target.crate_types.contains(kind) {
             root := i
         }
     }
@@ -615,9 +674,31 @@ fn linked(ws: RustWorkspace, package: String, kind: String, suffix: String, feat
 }
 
 def tests(ws: RustWorkspace, package: String, features: List<String> = []) -> List<RustTest> {
-    let graph = planned(ws, package, "test", features)
-    let roots = for i in 0..len(graph.units) if graph.units[i].mode == "test" { = i }
-    let made = built(ws, graph, roots)
+    = tested(ws, package, "test", features)
+}
+
+def benches(ws: RustWorkspace, package: String, features: List<String> = []) -> List<RustTest> {
+    = tested(ws, package, "benches", features)
+}
+
+# The test programs of the member `package` that Cargo's plan for `mode`
+# has, `test` or `benches`, with `features`, each with its package's
+# programs and examples, which the plan builds with them.
+fn tested(ws: RustWorkspace, package: String, mode: String, features: List<String>) -> List<RustTest> {
+    let graph = planned(ws, package, mode, features)
+    let id = member_id(ws, package)
+    # `--benches` selects every target that is benchmarked, a program's
+    # unit tests among them: only the benchmarks themselves.
+    let roots = for i in 0..len(graph.units) if graph.units[i].pkg_id == id and graph.units[i].mode == "test" and (mode != "benches" or graph.units[i].target.kind.contains("bench")) {
+        = i
+    }
+    let shown = for i in 0..len(graph.units) if graph.units[i].pkg_id == id and graph.units[i].mode == "build" and graph.units[i].target.kind.contains("example") {
+        = i
+    }
+    let made = built(ws, graph, [...roots, ...shown])
+    let examples = for i in shown {
+        = {at = "{EXAMPLES}/{graph.units[i].target.name}"; place = made[i].dir.file(made[i].files[0])}
+    }
     = for i in roots {
         let package = unit_at(ws, graph, made, i)
         = {
@@ -630,6 +711,7 @@ def tests(ws: RustWorkspace, package: String, features: List<String> = []) -> Li
                 let built = made[dep.index]
                 = {at = "{BIN_EXE}/{graph.units[dep.index].target.name}"; place = built.dir.file(built.files[0])}
             }
+            examples = examples
             env = run_env(ws, graph.units[i])
         }
     }
@@ -645,15 +727,17 @@ def run_test(
     # What a test is given may already be its package's, a sibling member
     # whole beside it say: each path is placed once.
     let had = for each in test.placed { = each.at }
+    let program = "{TEST_DIR}/{test.name}"
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = test.rust.runtime},
-        {at = "/work/test"; place = test.program},
+        {at = program; place = test.program},
         ...(for each in test.programs { = {at = each.at; place = each.place} }),
+        ...(for each in test.examples { = {at = each.at; place = each.place} }),
         ...(for each in test.placed { = {at = each.at; place = each.place} }),
         ...(for each in given if not had.contains(each.at) { = {at = each.at; place = each.place} }),
     ]
     let box = fs.compose(placed).sandbox(cwd = test.at)
-    let ran = box.exec("/work/test", ...args, env = environment([{key = "PATH"; value = "/usr/bin:/bin"}, ...test.env, ...env]))
+    let ran = box.exec(program, ...args, env = environment([{key = "PATH"; value = "/usr/bin:/bin"}, ...test.env, ...env]))
 }
 
 def doctests(
@@ -667,7 +751,8 @@ def doctests(
         return []
     }
     let graph = planned(ws, package, "doc", features)
-    let roots = for i in 0..len(graph.units) if graph.units[i].mode == "doctest" { = i }
+    let id = member_id(ws, package)
+    let roots = for i in 0..len(graph.units) if graph.units[i].pkg_id == id and graph.units[i].mode == "doctest" { = i }
     let made = built(ws, graph, needs(graph, roots))
     = for i in roots {
         = doctested(ws.rust, doctest_of(ws, graph, made, unit_at(ws, graph, made, i)), given, env)
@@ -839,9 +924,13 @@ fn doc_of(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt) ->
 }
 
 # The units of the member `package`'s build, or its tests' if `mode` is
-# `test`, as Cargo plans them.
+# `test`, as Cargo plans them: with every member's if the workspace is
+# planned whole, its features named by the member's, `features` of
+# `package`.
 fn planned(ws: RustWorkspace, package: String, mode: String, features: List<String> = []) ->> UnitGraph {
-    let graph: UnitGraph = json.decode(unit_graph(ws.rust, ws.skeleton, ws.vendor, ws.target, package, mode, features).read())
+    let selected = if ws.whole { "" } else { package }
+    let named = if ws.whole { for each in features { = if each.contains("/") { each } else { "{package}/{each}" } } } else { features }
+    let graph: UnitGraph = json.decode(unit_graph(ws.rust, ws.skeleton, ws.vendor, ws.target, selected, mode, named, ws.profile, ws.profile_env).read())
     = graph
 }
 
@@ -1366,7 +1455,7 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         {key = "OUT_DIR"; value = OUT},
         {key = "TARGET"; value = target},
         {key = "HOST"; value = HOST},
-        {key = "PROFILE"; value = "release"},
+        {key = "PROFILE"; value = profile_dir(ws, profile.name)},
         {key = "OPT_LEVEL"; value = profile.opt_level},
         {key = "DEBUG"; value = if debug { "true" } else { "false" }},
         {key = "NUM_JOBS"; value = "1"},
@@ -1424,6 +1513,18 @@ fn linked_roots(ws: RustWorkspace, graph: UnitGraph, i: Int) -> List<String> {
         pending := [...pending, ...(for dep in graph.units[next].dependencies { = dep.index })]
     }
     = for each in ids.unique() { = path.dirname(package_of(ws, each).manifest_path) }
+}
+
+# What Cargo tells a build script of the profile `name` in `PROFILE`:
+# `release` for one that inherits from `release`, and `debug` for one that
+# inherits from `dev`.
+fn profile_dir(ws: RustWorkspace, name: String) -> String {
+    for each in ws.profiles {
+        if each.name == name {
+            return if each.root == "release" { "release" } else { "debug" }
+        }
+    }
+    panic("Cargo's plan names a profile the workspace lacks, `{name}`")
 }
 
 # The name of the archiver beside the C compiler `cc`, `x86_64-linux-ar`

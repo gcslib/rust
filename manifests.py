@@ -15,6 +15,10 @@ and writes, for each member, by its package ID:
 - `doctest`: whether the package has a library whose documentation is
   tested.
 
+and, under `profiles`, each profile the workspace's manifest defines and
+Cargo's own, by its name, with the profile it inherits from at the root of
+its chain, `dev` or `release`, which tells a build script's `PROFILE`.
+
 Usage: manifests.py METADATA OUTPUT, METADATA what `cargo metadata` wrote.
 """
 
@@ -87,6 +91,25 @@ def plain_targets(package: dict, name: str) -> list[dict]:
     return plain
 
 
+def profile_roots(root: dict) -> list[dict]:
+    """Each profile of the workspace's manifest `root`, and Cargo's own,
+    with the profile at the root of its chain of `inherits`."""
+    defined = root.get("profile", {})
+    builtin = {"dev": "dev", "test": "dev", "release": "release", "bench": "release"}
+    roots = []
+    for name in sorted(set(builtin) | set(defined)):
+        seen = [name]
+        at = name
+        while at not in builtin:
+            parent = defined.get(at, {}).get("inherits")
+            if parent is None or parent in seen:
+                raise SystemExit(f"Cargo.toml: profile `{at}` inherits from no profile Cargo knows")
+            seen.append(parent)
+            at = parent
+        roots.append({"name": name, "root": builtin[at]})
+    return roots
+
+
 def main() -> None:
     """Write the facts of each workspace member."""
     metadata = json.loads(Path(sys.argv[1]).read_text())
@@ -114,7 +137,7 @@ def main() -> None:
                 ),
             }
         )
-    Path(sys.argv[2]).write_text(json.dumps(facts))
+    Path(sys.argv[2]).write_text(json.dumps({"packages": facts, "profiles": profile_roots(root)}))
 
 
 if __name__ == "__main__":
