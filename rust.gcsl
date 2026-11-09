@@ -497,14 +497,25 @@ def default_target_c(target: String) -> toolchain.CToolchain {
 
 # The directory of the C compiler's own headers, `stddef.h`'s, in the C
 # toolchain `c`, from its install's root: what `cc -print-file-name=include`
-# says.
+# says. GCC's is `LIBDIR/gcc/TARGET/VERSION/include`: `lib/gcc/...` in an
+# install of its own, as Bootlin's, and under `usr/lib`, in a directory of
+# the target's libraries, say, in a root that holds GCC as a system does.
+# `usr/lib` is looked in first, and only if it is there, so that a root's
+# `lib`, a link to `/usr/lib`, isn't followed out of it.
 def builtin_headers(c: toolchain.CToolchain) ->> String {
-    for each in c.root.dir("lib/gcc").files() {
-        if each.path.ends_with("/include/stddef.h") {
-            return each.path.strip_prefix(c.root.path).strip_prefix("/").strip_suffix("/stddef.h")
+    for place in ["usr/lib", "lib/gcc"] {
+        if not fs.exists("{c.root.path}/{place}") {
+            continue
+        }
+        for each in c.root.dir(place).files() {
+            let parts = each.path.split("/")
+            let n = len(parts)
+            if n >= 5 and parts[n - 1] == "stddef.h" and parts[n - 2] == "include" and parts[n - 5] == "gcc" {
+                return each.path.strip_prefix(c.root.path).strip_prefix("/").strip_suffix("/stddef.h")
+            }
         }
     }
-    panic("the C toolchain at `{c.root.path}` has no `lib/gcc/*/include/stddef.h`")
+    panic("the C toolchain at `{c.root.path}` has no `lib/gcc/*/*/include/stddef.h`, nor any under `usr/lib`")
 }
 
 # The C++ compiler beside the C compiler at `cc`: `x86_64-linux-g++`
