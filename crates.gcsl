@@ -10,7 +10,9 @@
 #   says, each crate with the features Cargo resolves for that member alone,
 #   so that a member's features never reach another's crates. Planning reads
 #   the manifests, the lock and which files there are, never what the
-#   sources say, so a change to a source plans nothing again. `rustflags`
+#   sources say, so a change to a source plans nothing again; it reads none
+#   under a hidden directory or one of `ignore`, paths relative to `src`, a
+#   build's outputs, and pekit lists none of a nested checkout. `rustflags`
 #   are given to every crate built for the target, after Cargo's, as
 #   `RUSTFLAGS` would be, and `^extra_rustflags` after them; `crates` are
 #   settings of particular packages, a `CrateSettings` each; `libclang` a
@@ -277,21 +279,33 @@ fn pinned_python() -> PythonToolchain {
 
 # The skeleton of the workspace `src`: its manifests, its lock, and
 # `.cargo` configuration, as they are, and every other file's path, but
-# those under a hidden directory, Cargo's own among them, or one of
-# `ignore` at the top, a build's outputs.
+# those under a hidden directory, Cargo's own among them, or under one of
+# `ignore`, paths relative to `src` of a build's outputs. pekit lists
+# nothing of a nested checkout or a worktree, a directory that holds a
+# `.git` of its own.
 fn skeleton_of(src: Dir, ignore: List<String>) ->> Skeleton {
     let found = for each in src.files() {
         = {at = each.path.strip_prefix(src.path).strip_prefix("/"); place = each}
     }
     # `ignore` first: a build's outputs, pekit's among them, are most of the
     # files.
-    let kept = for each in found if not ignore.contains(each.at.split("/")[0]) and not hidden(each.at) {
+    let kept = for each in found if not ignored(each.at, ignore) and not hidden(each.at) {
         = each
     }
     = {
         manifests = for each in kept if is_manifest(each.at) { = each }
         paths = for each in kept if not is_manifest(each.at) { = each.at }
     }
+}
+
+# Whether the path `at` is one of `ignore` or under one.
+fn ignored(at: String, ignore: List<String>) -> Bool {
+    for each in ignore {
+        if at == each or at.starts_with("{each}/") {
+            return true
+        }
+    }
+    = false
 }
 
 # Whether the path `at` is under a hidden directory, or is a hidden file,
@@ -1311,11 +1325,13 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     let target = if host { HOST } else { ws.target }
     let root = path.dirname(at.package.manifest_path)
     let mut scripts: List<Built> = []
+    let mut compiled = -1
     let mut links: List<{links: String, dir: Dir | Future<Dir>}> = []
     for dep in unit.dependencies {
         let given = made[dep.index]
         if given.kind == "script" {
             scripts := [given]
+            compiled := dep.index
         } else if given.kind == "run" {
             let linked = package_of(ws, graph.units[dep.index].pkg_id).links
             if linked != "" {
@@ -1325,6 +1341,17 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
     }
     if len(scripts) != 1 {
         panic("the build-script run of `{at.package.name}` has no build script")
+    }
+    # The directories of the packages whose crates the build script links,
+    # as Cargo leaves every package's where it is: a build dependency may
+    # read its own sources when the script runs, as `luau0-src` reads the
+    # C++ it builds.
+    let had = for each in at.placed { = each.at }
+    let mut sources: List<{at: String, place: Dir | File}> = []
+    for each in linked_roots(ws, graph, compiled) {
+        if each != root and not had.contains(each) {
+            sources := [...sources, ...crate_entries(ws, each)]
+        }
     }
     let profile = unit.profile
     let debuginfo = profile.debuginfo
@@ -1349,6 +1376,7 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         {key = "CARGO_ENCODED_RUSTFLAGS"; value = rustflags.join("\u{1f}")},
         {key = "CARGO_MANIFEST_LINKS"; value = at.package.links},
         {key = "CC_{target_var}"; value = if host { cc } else { target_cc }},
+        {key = "CXX_{target_var}"; value = cxx_of(if host { cc } else { target_cc })},
         {key = "AR_{target_var}"; value = if host { "{OPT_CC}/bin/{ar_of(cc)}" } else { target_ar }},
         ...(for each in unit.features { = {key = "CARGO_FEATURE_{upper(each.split("-").join("_"))}"; value = "1"} }),
         ...at.settings.env,
@@ -1367,7 +1395,7 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         program = scripts[0].files[0]
         env = env
         cwd = root
-        placed = [...at.placed, ...at.given]
+        placed = [...at.placed, ...sources, ...at.given]
         links = links
         cfg = if host { ws.host_cfg } else { ws.target_cfg }
     }
@@ -1377,6 +1405,25 @@ fn script_ran(ws: RustWorkspace, graph: UnitGraph, made: List<Built>, at: UnitAt
         runs = []
         given = at.given
     }
+}
+
+# The directories of the packages of the crates the unit `i` of `graph`
+# depends on, transitively, each once.
+fn linked_roots(ws: RustWorkspace, graph: UnitGraph, i: Int) -> List<String> {
+    let mut seen = for each in graph.units { = false }
+    let mut pending = for dep in graph.units[i].dependencies { = dep.index }
+    let mut ids: List<String> = []
+    for len(pending) > 0 {
+        let next = pending[len(pending) - 1]
+        pending := for k in 0..(len(pending) - 1) { = pending[k] }
+        if seen[next] {
+            continue
+        }
+        seen[next] := true
+        ids := [...ids, graph.units[next].pkg_id]
+        pending := [...pending, ...(for dep in graph.units[next].dependencies { = dep.index })]
+    }
+    = for each in ids.unique() { = path.dirname(package_of(ws, each).manifest_path) }
 }
 
 # The name of the archiver beside the C compiler `cc`, `x86_64-linux-ar`

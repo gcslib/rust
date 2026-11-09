@@ -76,7 +76,9 @@
 # - `default_rustflags(target)`, `default_target_c(target)`: the flags and
 #   the C toolchain a build for `target` takes unless given, as
 #   `cargo_build` describes them; `builtin_headers(c)`, the directory of the
-#   C compiler's own headers in the C toolchain `c`, from its root.
+#   C compiler's own headers in the C toolchain `c`, from its root;
+#   `cxx_of(cc)`, the C++ compiler beside the C compiler at `cc`, which build
+#   scripts are given as `CXX_<target>`.
 # - `context extra_rustflags`: rustc arguments that every build of this
 #   library gives every crate it compiles for the target, after its own
 #   flags and the profile's, as a distribution's `RUSTFLAGS` follow a
@@ -486,6 +488,21 @@ def builtin_headers(c: toolchain.CToolchain) ->> String {
     panic("the C toolchain at `{c.root.path}` has no `lib/gcc/*/include/stddef.h`")
 }
 
+# The C++ compiler beside the C compiler at `cc`: `x86_64-linux-g++`
+# beside `x86_64-linux-gcc`, `clang++` beside `clang`, and `c++` beside any
+# other.
+def cxx_of(cc: String): String {
+    let dir = path.dirname(cc)
+    let name = path.basename(cc)
+    if name.ends_with("gcc") {
+        return "{dir}/{name.strip_suffix("gcc")}g++"
+    }
+    if name.ends_with("clang") {
+        return "{dir}/{name}++"
+    }
+    = "{dir}/c++"
+}
+
 def cargo_sources(vendor: Vendored): String {
     # Each git source, found among the vendored crates, as `cargo vendor`
     # writes it: the repository and its query, a revision say.
@@ -559,7 +576,7 @@ def cargo_build(
         config,
         "{cargo_sources(vendor)}\
          [target.{target}]\nlinker = \"{cc}\"\n{host}\
-         [env]\nCC_{target_var} = \"{target_cc}\"\nAR_{target_var} = \"{target_ar}\"\n{given}\
+         [env]\nCC_{target_var} = \"{target_cc}\"\nCXX_{target_var} = \"{cxx_of(target_cc)}\"\nAR_{target_var} = \"{target_ar}\"\n{given}\
          [build]\nrustflags = [{quoted_flags}]\n",
     )
     let placed: List<{at: String, place: Dir | File | FileSet}> = [

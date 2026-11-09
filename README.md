@@ -62,6 +62,13 @@ with the same features, share them.
   that reads files of its repository outside its own directory, which
   vendoring leaves behind: `{at = "../shared/words.txt"; place = ...}` for
   a crate that `include_str!`s `../../shared/words.txt` from `src/lib.rs`.
+  Planning reads the manifests and the paths of the other files, but none
+  under a hidden directory or one of `ignore`, paths relative to the
+  workspace, by default `["target", "pekit-out"]`. Add a build's other
+  outputs, such as `["target", "pekit-out", "docs/dist"]`, so that they
+  don't plan the workspace again when they change. pekit lists nothing of
+  a nested checkout or worktree, a directory holding a `.git` of its own.
+  Planning doesn't read `.gitignore`.
 - `bin(ws, package)`, `library(ws, package)`, `static_library(ws,
   package)`, `example(ws, package, name)`: a member's program, its shared
   library, its static archive and one of its examples that is a program,
@@ -90,15 +97,25 @@ with the same features, share them.
   against glibc; the flags and the C compiler for crates' C follow the
   target.
 - `crates(lock)` and `git_crates(lock)`: the crates a lock file pins.
-- `default_rustflags(target)`, `default_target_c(target)` and
-  `builtin_headers(c)`: the flags and the C toolchain a build for `target`
-  takes unless given, and where a C toolchain's own headers are.
+- `default_rustflags(target)`, `default_target_c(target)`,
+  `builtin_headers(c)` and `cxx_of(cc)`: the flags and the C toolchain a
+  build for `target` takes unless given, where a C toolchain's own headers
+  are, and the C++ compiler beside a C compiler.
 
 A member's crates are compiled with what Cargo takes from its manifest and
 its plans leave out: its `[lints]`, its `--check-cfg` flags and which of its
 targets have no test harness, which `manifests.py` reads, and link-time
 optimization worked out per crate as Cargo works it out. Its profile's
 `strip` applies as Cargo applies it.
+
+A build script that compiles C or C++ through the `cc` crate finds the C
+compiler in `CC_<target>`, the C++ compiler beside it in `CXX_<target>`
+(`x86_64-linux-g++` beside `x86_64-linux-gcc`), and the archiver in
+`AR_<target>`. No pkg-config is pinned, so a build script's probe for a
+system library fails the same way on every machine. A crate that falls
+back without one, or loads its library at run time, builds. Give one that
+needs a library both the library and what it needs to find it, through
+`given` and `env`.
 
 It needs the [gcc](https://github.com/gcslib/gcc),
 [buildenv](https://github.com/gcslib/buildenv) and
