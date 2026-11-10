@@ -3,11 +3,12 @@
 #
 # - `Toolchain::Rust`: a Rust toolchain, a `RustToolchain`: `root`, rustc,
 #   Cargo and the standard libraries of its targets, laid out as one
-#   install; `runtime`, a root they run on; `cc`, the C compiler that links
-#   what rustc compiles, and `cc_root`, its install; `clippy`, Clippy's
-#   component, whose `bin/clippy-driver` runs with `root`'s libraries; and
-#   `source`, its `rust-src` component as its archive has it: the source of
-#   its standard libraries, the Cargo workspace
+#   install; `runtime`, a root they run on, with no user database of its
+#   own, so that its programs find the step's user; `cc`, the C compiler
+#   that links what rustc compiles, and `cc_root`, its install; `clippy`,
+#   Clippy's component, whose `bin/clippy-driver` runs with `root`'s
+#   libraries; and `source`, its `rust-src` component as its archive has
+#   it: the source of its standard libraries, the Cargo workspace
 #   `rust-src/lib/rustlib/src/rust/library`, with the crates they depend on
 #   vendored in its `vendor`, and `git-commit-hash`, the commit of
 #   rust-lang/rust it was built from, by which its prebuilt standard
@@ -17,10 +18,10 @@
 # - `rust_1_98`: Rust 1.98.1 from static.rust-lang.org, each part pinned by
 #   its SHA-256, with the standard libraries of `x86_64-unknown-linux-gnu`
 #   and `x86_64-unknown-linux-musl` and their source, running on the gcc
-#   library's Bootlin sysroot and linking with its compiler. rustc needs
-#   zlib, which the sysroot lacks: zlib, from its pinned source, is built
-#   with the buildenv library's pinned environment and put beside rustc's
-#   own libraries.
+#   library's Bootlin sysroot, less its user database, and linking with
+#   its compiler. rustc needs zlib, which the sysroot lacks: zlib, from its
+#   pinned source, is built with the buildenv library's pinned environment
+#   and put beside rustc's own libraries.
 # - `Crate`: a crate of crates.io, as `Cargo.lock` pins it: its name,
 #   version and checksum, the SHA-256 of its `.crate` file.
 # - `GitCrate`: a crate of a git repository, as `Cargo.lock` pins it: its
@@ -173,7 +174,7 @@ def Toolchain::Rust rust_1_98() {
             ],
             zlib.dir("lib"),
         )
-        runtime = linker.runtime
+        runtime = without_users(linker.runtime, Toolchain::BuildEnv.payload(e))
         cc = linker.cc
         cc_root = linker.root
         clippy = part(
@@ -211,6 +212,26 @@ fn zlib_source() -> Dir {
         sha256 = "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
     )
     = unpack(archive).dir("zlib-1.3.1")
+}
+
+# The root `runtime` without its user database, `etc/passwd`, `etc/group`
+# and `etc/shadow`, copied with `env`'s tools. Bootlin's sysroot has
+# buildroot's, which names no user 1000, and a sandbox's own database hides
+# pekit's: without it, a program run on the root, a test that looks up its
+# own user say, finds the step's user, as a step's own programs do.
+#[hermetic]
+fn without_users(runtime: Dir, env: BuildEnv) -> Dir {
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = env.root},
+        {at = "/work/runtime"; place = runtime},
+    ]
+    let box = fs.compose(placed).sandbox(cwd = "/work", env = {PATH = "/bin:/usr/bin"})
+    let copied = box.exec(
+        "/bin/sh",
+        "-c",
+        "cp -a /work/runtime /work/out && rm -f /work/out/etc/passwd /work/out/etc/group /work/out/etc/shadow",
+    )
+    = box.dir("/work/out")
 }
 
 # rustc, Cargo and the standard libraries `std`, each a component's tree,
