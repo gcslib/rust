@@ -54,8 +54,9 @@
 #   examples, which `cargo test` builds with them; `benches(ws, package)`:
 #   its benchmarks, as `cargo test --benches` builds them, a `RustTest`
 #   each; `run_test(test)` runs one, a step, in a sandbox of the toolchain's
-#   runtime with a writable `/tmp`, from its package's directory, which it
-#   holds, with the package's `data` and `beside`, as Cargo runs a test,
+#   runtime with a writable `/tmp`, as the step's user, whom the step's
+#   user database names, from its package's directory, which it holds,
+#   with the package's `data` and `beside`, as Cargo runs a test,
 #   told of its package as Cargo tells a test it runs, `CARGO_MANIFEST_DIR`
 #   and `CARGO_PKG_VERSION` say, those programs where it was told, the
 #   test program at `/work/deps/<name>` and the examples beside it in
